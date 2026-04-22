@@ -1,10 +1,12 @@
+import logging
 import threading
-import traceback
 
 from faster_whisper import WhisperModel
 from resemblyzer import VoiceEncoder
 
 from .config import device, compute_type
+
+logger = logging.getLogger(__name__)
 
 model: WhisperModel | None = None
 current_model_size: str | None = None
@@ -23,16 +25,16 @@ def load_model(model_size: str) -> None:
         if current_model_size == model_size and model is not None:
             return
         try:
-            print(f"🔄 Model yükleniyor ({model_size}, {device})...")
+            logger.info(f"Model yükleniyor: {model_size} (Cihaz: {device})")
             model = WhisperModel(
                 f"Systran/faster-whisper-{model_size}",
                 device=device,
                 compute_type=compute_type,
             )
             current_model_size = model_size
-            print("✅ Model yüklendi!")
-        except Exception:
-            traceback.print_exc()
+            logger.info("Model başarıyla yüklendi.")
+        except Exception as e:
+            logger.exception(f"Model yüklenirken hata oluştu: {model_size}")
             model = None
             current_model_size = None
 
@@ -42,7 +44,7 @@ def get_voice_encoder() -> VoiceEncoder:
     if voice_encoder is None:
         with _encoder_lock:
             if voice_encoder is None:
-                print("🔄 Ses encoder yükleniyor...")
+                logger.info("Ses encoder (Resemblyzer) yükleniyor...")
                 voice_encoder = VoiceEncoder()
-                print("✅ Ses encoder yüklendi!")
+                logger.info("Ses encoder başarıyla yüklendi.")
     return voice_encoder
