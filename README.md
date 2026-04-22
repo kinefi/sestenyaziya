@@ -36,7 +36,6 @@ uv run gradio main.py
 ## Proje Yapısı
 
 ```text
-ses2yazi/
 ├── app/
 │   ├── config.py         # ModelSize enum, sabitler, cihaz tespiti
 │   ├── models.py         # Whisper ve VoiceEncoder yükleme, duraklatma/durdurma eventleri
