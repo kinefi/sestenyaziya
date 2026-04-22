@@ -20,6 +20,7 @@ def on_start():
         gr.update(interactive=True),   # pause_btn
         gr.update(interactive=True),   # stop_btn
         "",                            # detected_speakers — clear from previous run
+        gr.update(interactive=False),  # download_file
     )
 
 
@@ -37,13 +38,12 @@ def on_stop():
 
 
 _CSS = """
-    footer { display: none !important; }
-    .gradio-container { max-width: 1100px !important; margin: auto !important; }
+    .gradio-container { max-width: 1024px !important; margin: auto !important; }
 
     /* ── Remove block margins ────────────────────────────────── */
     .gradio-container .block {
         margin: 0 !important;
-        padding: 4px 8px !important;
+        padding: 5px !important;
     }
 
     /* ── Collapse flex gaps between components ───────────────── */
@@ -59,25 +59,15 @@ _CSS = """
     .gradio-container .label-wrap { padding-bottom: 1px !important; }
 """
 
-with gr.Blocks(title="Sesten Yazıya") as demo:
+with gr.Blocks(title="Sesten Yazıya", css=_CSS) as demo:
 
-    gr.HTML(f"""
-        <style>{_CSS}</style>
-        <div style="display:flex; align-items:center; justify-content:center; gap:10px;
-                    padding: 8px 16px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    border-radius: 10px; margin-bottom: 6px; color: white;">
-            <span style="font-size:1.5rem;">🎙️</span>
-            <div>
-                <h1 style="font-size:1.15rem; font-weight:700; margin:0; line-height:1.3;">
-                    Sesten Yazıya
-                </h1>
-                <p style="font-size:0.75rem; opacity:0.85; margin:0;">
-                    Yapay zeka ile Türkçe ses kayıtlarını metne dönüştürün &nbsp;•&nbsp; {device.upper()}
-                </p>
-            </div>
-        </div>
-    """)
+    with gr.Row():
+        gr.Markdown(f"""
+                    # 🎙️ Sesten Yazıya
+                    Yapay zeka ile Türkçe ses kayıtlarını metne dönüştürün &nbsp;•&nbsp; {device.upper()}.
+                    Sonuçlar anlık ekrana düşer. Model değiştirilirse ilk çalıştırmada yeniden yüklenir.
+                    [Kaynak kodu inceleyebilirsiniz.](https://github.com/tekrei/sestenyaziya)
+                    """)
 
     with gr.Row(equal_height=True):
 
@@ -94,53 +84,42 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 label="Model  (small: hızlı · medium: dengeli · large-v3: kaliteli)",
             )
 
-            gr.HTML("<hr style='margin:4px 0; border:none; border-top:1px solid #e5e7eb;'>")
-
             enable_diarization = gr.Checkbox(
                 label="Konuşmacıları ayırt et",
                 value=False,
             )
-            num_speakers_slider = gr.Slider(
-                minimum=1,
-                maximum=20,
-                step=1,
-                value=1,
-                label="Konuşmacı sayısı (1 = otomatik algıla)",
-                visible=False,
-            )
+            with gr.Row(visible=False) as diarization_row:
+                num_speakers_slider = gr.Slider(
+                    minimum=1,
+                    maximum=10,
+                    step=1,
+                    value=1,
+                    label="Konuşmacı sayısı (1 = otomatik algıla)",
+                )
             detected_speakers = gr.Markdown("")
             status_text = gr.Markdown("")
-
-            gr.HTML("""
-                <div style="background:#f0fdf4; border:1px solid #86efac;
-                            border-radius:6px; padding:5px 10px;">
-                    <p style="margin:0; color:#166534; font-size:11px;">
-                        💡 Sonuçlar anlık ekrana düşer.
-                        Model değiştirilirse ilk çalıştırmada yeniden yüklenir.
-                    </p>
-                </div>
-            """)
-
-            with gr.Row():
-                submit_btn = gr.Button("✨ Başlat", variant="primary", scale=2)
-                pause_btn  = gr.Button("⏸️ Duraklat", interactive=False, scale=1)
-                stop_btn   = gr.Button("⏹️ Durdur", variant="stop", interactive=False, scale=1)
 
         with gr.Column(scale=1):
 
             output_text = gr.Textbox(
                 label="Transkripsiyon Sonucu",
                 placeholder="Sonuçlar konuşma algılandıkça buraya akacak...",
-                lines=10,
+                lines=20,
                 interactive=False,
             )
-            with gr.Row():
-                download_file = gr.File(label="📥 İndir (.txt)", scale=1, min_width=0)
+
+    with gr.Row():
+        submit_btn = gr.Button("✨ Başlat", variant="primary", scale=2)
+        pause_btn = gr.Button("⏸️ Duraklat", interactive=False, scale=1)
+        stop_btn = gr.Button("⏹️ Durdur", variant="stop",
+                             interactive=False, scale=1)
+        download_file = gr.DownloadButton(
+            label="📥 İndir (.txt)", interactive=False)
 
     enable_diarization.change(
         fn=lambda enabled: gr.update(visible=enabled),
         inputs=[enable_diarization],
-        outputs=[num_speakers_slider],
+        outputs=[diarization_row],
     )
 
     btn_outputs = [submit_btn, pause_btn, stop_btn]
@@ -148,15 +127,19 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
     (
         submit_btn.click(
             fn=on_start,
-            outputs=[submit_btn, pause_btn, stop_btn, detected_speakers],
+            outputs=[submit_btn, pause_btn, stop_btn,
+                     detected_speakers, download_file],
             queue=False,
         )
         .then(
             fn=transcribe,
-            inputs=[audio_input, model_selector, enable_diarization, num_speakers_slider],
-            outputs=[output_text, download_file, status_text, detected_speakers],
+            inputs=[audio_input, model_selector,
+                    enable_diarization, num_speakers_slider],
+            outputs=[output_text, download_file,
+                     status_text, detected_speakers],
         )
         .then(fn=on_finish, outputs=btn_outputs, queue=False)
+        .then(fn=lambda: gr.update(interactive=True), outputs=[download_file], queue=False)
     )
     stop_btn.click(fn=on_stop, outputs=btn_outputs, queue=False)
     pause_btn.click(fn=toggle_pause, outputs=[pause_btn])
