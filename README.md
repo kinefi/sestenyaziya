@@ -1,16 +1,17 @@
 # Ses'ten Yazıya
 
-Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren masaüstü web uygulaması.  
+Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uygulaması.  
 [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) ile transkripsiyon, [Resemblyzer](https://github.com/resemble-ai/resemblyzer) ile konuşmacı ayrıştırma ve [Gradio](https://www.gradio.app/) ile arayüz sağlar.
 
 ## Özellikler
 
 - Canlı akış — segmentler tamamlandıkça ekrana yansır
+- Model seçimi — small (hızlı), medium (dengeli), large-v3 (kaliteli)
 - Konuşmacı ayrıştırma — her konuşmacı ayrı paragraf olarak etiketlenir (token gerektirmez)
-- Otomatik konuşmacı sayısı tespiti
+- Otomatik konuşmacı sayısı tespiti (1–10 arası)
 - CUDA varsa GPU, yoksa CPU ile çalışır
-- `.txt` olarak indirilebilir çıktı
-- Duraklat / Durdur desteği
+- Transkripsiyon tamamlandığında `.txt` olarak indirilir
+- Duraklat / Devam et / Durdur desteği
 
 ## Kurulum
 
