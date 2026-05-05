@@ -9,10 +9,13 @@ Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uyg
 - Canlı akış — segmentler tamamlandıkça ekrana yansır
 - Model seçimi — small (hızlı), medium (dengeli), large-v3 (kaliteli)
 - Konuşmacı ayrıştırma — her konuşmacı ayrı paragraf olarak etiketlenir (token gerektirmez)
-- Otomatik konuşmacı sayısı tespiti (1–10 arası)
-- CUDA varsa GPU, yoksa CPU ile çalışır
-- Transkripsiyon tamamlandığında `.txt` olarak indirilir
+- Otomatik konuşmacı sayısı tespiti (1-10 arası) veya manuel giriş
+- Otomatik cihaz tespiti (CUDA varsa GPU, yoksa CPU kullanılır) ve hata durumunda CPU'ya geçiş.
+- Kalıcı önbellekleme (transkripsiyon ve konuşmacı imzaları için)
+- Konuşmacı ayrıştırma sürecinde performans iyileştirmeleri (binary search tabanlı).
+- Transkripsiyon tamamlandığında `.txt`, `.srt` ve `.vtt` formatlarında indirilebilir.
 - Duraklat / Devam et / Durdur desteği
+- Gelişmiş önbellek yönetimi arayüzü (Boyut sınırı ve temizleme)
 
 ## Kurulum
 
@@ -42,6 +45,7 @@ uv run gradio main.py
 │   ├── models.py         # Whisper ve VoiceEncoder yükleme, duraklatma/durdurma eventleri
 │   ├── diarization.py    # Ses yükleme (PyAV), konuşmacı ayrıştırma (KMeans)
 │   ├── transcription.py  # Transkripsiyon generator'ı
+│   ├── cache_utils.py    # Önbellek yönetimi, dosya hashing ve temizleme işlemleri
 │   └── ui.py             # Gradio arayüzü ve callback'ler
 ├── main.py               # Giriş noktası
 ├── pyproject.toml
@@ -52,8 +56,10 @@ uv run gradio main.py
 
 | Paket | Görev |
 | --- | --- |
-| `faster-whisper` | Konuşmadan metne (CTranslate2 tabanlı) |
+| `faster-whisper` | Hızlı Whisper implementasyonu |
+| `ctranslate2` | Model hızlandırma ve cihaz yönetimi |
 | `resemblyzer` | Konuşmacı gömme vektörleri |
 | `scikit-learn` | KMeans kümeleme (konuşmacı ayrıştırma) |
+| `av` (PyAV) | Bellek dostu ses akışı ve işleme |
 | `torch` (CPU) | Resemblyzer için PyTorch arka ucu |
 | `gradio` | Web arayüzü |

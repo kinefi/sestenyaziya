@@ -12,28 +12,20 @@ from .cache_utils import get_file_hash
 
 EMBEDDING_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-
-def _load_wav(audio_path: str) -> np.ndarray:
-    """Load audio as mono float32 at SAMPLE_RATE Hz via PyAV (handles m4a, mp3, wav, …)."""
+def _stream_audio(audio_path: str):
+    """Yields audio chunks from the file to avoid loading everything at once."""
     resampler = av.AudioResampler(format="fltp", layout="mono", rate=SAMPLE_RATE)
-    chunks: list[np.ndarray] = []
     try:
         with av.open(audio_path) as container:
+            if not container.streams.audio:
+                return
             for frame in container.decode(audio=0):
                 for out in resampler.resample(frame):
-                    chunks.append(out.to_ndarray()[0])
+                    yield out.to_ndarray()[0]
             for out in resampler.resample(None):
-                chunks.append(out.to_ndarray()[0])
-    except av.AVError:
-        return np.zeros(0, dtype=np.float32)
-    if not chunks:
-        return np.zeros(0, dtype=np.float32)
-    wav = np.concatenate(chunks).astype(np.float32)
-    peak = np.abs(wav).max()
-    if peak > 0:
-        wav = wav / peak * 0.9
-    return wav
-
+                yield out.to_ndarray()[0]
+    except (av.AVError, UnicodeDecodeError):
+        return
 
 def _auto_detect_k(embeddings: np.ndarray) -> tuple[int, np.ndarray]:
     """Pick the k with the best silhouette score in range [2, 5]."""
@@ -49,26 +41,18 @@ def _auto_detect_k(embeddings: np.ndarray) -> tuple[int, np.ndarray]:
         best_labels = KMeans(n_clusters=best_k, random_state=42, n_init=10).fit_predict(embeddings)
     return best_k, best_labels
 
-
 def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tuple[float, float, str]], bool]:
     """Returns (start_sec, end_sec, speaker_label) segments covering the full audio."""
     encoder = models.get_voice_encoder()
     
     if progress:
         progress(0.1, desc="Ses dosyası yükleniyor...")
-    wav = _load_wav(audio_path)
-    
-    if wav.size == 0:
-        return ([(0.0, 0.0, "Sistem: Ses yüklenemedi")], False)
 
-    duration_sec = len(wav) / SAMPLE_RATE
-
-    if progress:
-        progress(0.2, desc="Önbellek kontrol ediliyor...")
-    
     file_hash = get_file_hash(audio_path)
     cache_file = EMBEDDING_CACHE_DIR / f"{file_hash}.npz"
     is_cached = False
+    wav_splits = []
+    duration_sec = 0.0
 
     if cache_file.exists():
         if progress:
@@ -76,31 +60,54 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
         is_cached = True
         with np.load(cache_file, allow_pickle=True) as data:
             partial_embeds = data["embeds"]
-            # Reconstruct slices from saved indices
             wav_splits = [slice(start, stop) for start, stop in zip(data["starts"], data["stops"])]
+            if wav_splits:
+                duration_sec = wav_splits[-1].stop / SAMPLE_RATE
     else:
         if progress:
-            progress(0.3, desc="Konuşmacı imzaları çıkarılıyor (bu işlem zaman alabilir)...")
+            progress(0.3, desc="Konuşmacı imzaları çıkarılıyor...")
         
-        # rate=2 → one embedding per 500 ms; sufficient for clustering, ~8× faster than rate=16
-        _, partial_embeds, wav_splits = encoder.embed_utterance(
-            wav, return_partials=True, rate=2
-        )
-        
-        # Save to cache
-        np.savez(
-            cache_file,
-            embeds=partial_embeds,
-            starts=[s.start for s in wav_splits],
-            stops=[s.stop for s in wav_splits]
-        )
+        all_partial_embeds = []
+        current_samples = []
+        current_count = 0
+        total_processed = 0
+        chunk_limit = 5 * 60 * SAMPLE_RATE
+
+        def process_chunk():
+            nonlocal total_processed, current_samples, current_count
+            if not current_samples:
+                return
+            segment = np.concatenate(current_samples).astype(np.float32)
+            m = np.abs(segment).max()
+            if m > 0:
+                segment /= (m / 0.9)
+            _, embeds, slices = encoder.embed_utterance(segment, return_partials=True, rate=2)
+            all_partial_embeds.append(embeds)
+            for s in slices:
+                wav_splits.append(slice(s.start + total_processed, s.stop + total_processed))
+            total_processed += current_count
+            current_samples = []
+            current_count = 0
+
+        for audio_chunk in _stream_audio(audio_path):
+            current_samples.append(audio_chunk)
+            current_count += len(audio_chunk)
+            if current_count >= chunk_limit:
+                process_chunk()
+
+        process_chunk()
+
+        if not all_partial_embeds:
+            return ([(0.0, 0.0, "Sistem: Ses yüklenemedi")], False)
+
+        partial_embeds = np.concatenate(all_partial_embeds, axis=0)
+        duration_sec = total_processed / SAMPLE_RATE
+        np.savez(cache_file, embeds=partial_embeds, starts=[s.start for s in wav_splits], stops=[s.stop for s in wav_splits])
 
     if progress:
         progress(0.8, desc="Konuşmacılar gruplandırılıyor...")
 
     n = len(partial_embeds)
-    
-    # Handle cases where clustering is impossible or not requested
     if duration_sec < 2.0 or n < 2 or num_speakers == 1:
         return ([(0.0, duration_sec, "Konuşmacı 1")], False)
 
@@ -113,7 +120,6 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
         best_labels = KMeans(n_clusters=num_speakers, random_state=42, n_init=10).fit_predict(partial_embeds)
 
     seen: dict[int, int] = {}
-
     def speaking_order(raw: int) -> int:
         if raw not in seen:
             seen[raw] = len(seen) + 1
@@ -124,7 +130,6 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
         for split, lbl in zip(wav_splits, best_labels)
     ]
     return segments, is_cached
-
 
 def dominant_speaker(start: float, end: float, timeline: list[tuple[float, float, str]]) -> str:
     """Returns the speaker with the greatest time overlap in [start, end]."""

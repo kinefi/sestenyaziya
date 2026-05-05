@@ -1,4 +1,7 @@
+#!/usr/bin/env python3
+
 import argparse
+import os
 
 import app.config as cfg
 from app.cache_utils import clean_embedding_cache
@@ -39,6 +42,11 @@ def setup_config():
         action="store_true",
         help="Herkese açık Gradio paylaşım bağlantısı oluştur",
     )
+    parser.add_argument(
+        "--hf-token",
+        default=os.getenv("HF_TOKEN"),
+        help="Hugging Face Hub erişim tokenı (rate limit uyarılarını önlemek için)",
+    )
 
     # parse_known_args ignores Gradio's own argv when hot-reloading
     args, _ = parser.parse_known_args()
@@ -48,6 +56,9 @@ def setup_config():
     cfg.SAMPLE_RATE = args.sample_rate
     cfg.PARAGRAPH_PAUSE = args.paragraph_pause
     
+    if args.hf_token:
+        os.environ["HF_TOKEN"] = args.hf_token
+
     return args
 
 
@@ -62,7 +73,7 @@ if __name__ == "__main__":
     print(f"🖥️  Cihaz: {cfg.device.upper()} | Hesaplama tipi: {cfg.compute_type}")
 
     # Deferred import: UI components must load AFTER config is mutated
-    from app.ui import demo
+    from app.ui import demo, UI_CSS
 
     demo.queue()
-    demo.launch(share=args.share, show_error=True, server_port=args.port)
+    demo.launch(share=args.share, show_error=True, server_port=args.port, css=UI_CSS)

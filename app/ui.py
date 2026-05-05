@@ -1,12 +1,10 @@
 import gradio as gr
 
 from . import models
-from . import config as cfg
 from .config import (ModelSize, DEFAULT_MODEL_SIZE, device,
                      EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR, CACHE_BASE_DIR, DEFAULT_CACHE_SIZE_MB)
 from .transcription import transcribe
 from .cache_utils import clear_all_cache, clean_embedding_cache, get_cache_size_mb
-import logging
 
 def toggle_pause():
     if models.pause_event.is_set():
@@ -56,7 +54,7 @@ def handle_cache_cleanup(limit):
     return f"🧹 Temizlik yapıldı (Sınır: {limit} MB)", get_cache_status()
 
 
-_CSS = """
+UI_CSS = """
     .gradio-container { max-width: 1024px !important; margin: auto !important; }
 
     /* ── Remove block margins ────────────────────────────────── */
@@ -88,7 +86,7 @@ _CSS = """
     .gradio-container .label-wrap { padding-bottom: 1px !important; }
 """
 
-with gr.Blocks(title="Sesten Yazıya", css=_CSS) as demo:
+with gr.Blocks(title="Sesten Yazıya") as demo:
 
     with gr.Row():
         gr.Markdown(f"""
@@ -98,7 +96,7 @@ with gr.Blocks(title="Sesten Yazıya", css=_CSS) as demo:
                     [Kaynak kodu inceleyebilirsiniz.](https://github.com/tekrei/sestenyaziya)
                     """)
 
-    with gr.Row(equal_height=False):
+    with gr.Row(equal_height=True):
 
         with gr.Column(scale=1):
 
@@ -125,29 +123,7 @@ with gr.Blocks(title="Sesten Yazıya", css=_CSS) as demo:
                     value=1,
                     label="Konuşmacı sayısı (1 = otomatik algıla)",
                 )
-
-            with gr.Group():
-                gr.Markdown("### ⚙️ Önbellek Yönetimi")
-                cache_info_display = gr.Markdown(get_cache_status())
-                cache_limit_slider = gr.Slider(
-                    minimum=100, maximum=5000, step=100, 
-                    value=DEFAULT_CACHE_SIZE_MB, 
-                    label="Boyut Sınırı (MB)"
-                )
-                with gr.Row():
-                    cleanup_btn = gr.Button("🧹 Temizle", scale=1)
-                    clear_btn = gr.Button("🗑️ Tümünü Sil", variant="stop", scale=1)
-                cache_mgmt_status = gr.Label(value="", label="Durum")
-
-            cleanup_btn.click(
-                fn=handle_cache_cleanup, 
-                inputs=[cache_limit_slider], 
-                outputs=[cache_mgmt_status, cache_info_display]
-            )
-            clear_btn.click(
-                fn=handle_clear_cache, 
-                outputs=[cache_mgmt_status, cache_info_display]
-            )
+            open_cache_btn = gr.Button("⚙️ Önbellek Ayarları", variant="secondary")
 
             detected_speakers = gr.Markdown("")
             status_text = gr.Markdown("")
@@ -177,6 +153,48 @@ with gr.Blocks(title="Sesten Yazıya", css=_CSS) as demo:
         download_srt = gr.DownloadButton("📥 SRT İndir", interactive=False)
         download_vtt = gr.DownloadButton("📥 VTT İndir", interactive=False)
 
+    # --- Cache Management Pane ---
+    with gr.Column(visible=False) as cache_container:
+        with gr.Group():
+            gr.Markdown("### ⚙️ Önbellek Yönetimi")
+            cache_info_display = gr.Markdown(get_cache_status())
+            cache_limit_slider = gr.Slider(
+                minimum=100, maximum=5000, step=100, 
+                value=DEFAULT_CACHE_SIZE_MB, 
+                label="Boyut Sınırı (MB)"
+            )
+            with gr.Row():
+                cleanup_btn = gr.Button("🧹 Temizle", scale=1)
+                clear_btn = gr.Button("🗑️ Tümünü Sil", variant="stop", scale=1)
+            cache_mgmt_status = gr.Label(value="", label="Durum")
+            close_cache_btn = gr.Button("❌ Ayarları Kapat", variant="secondary")
+
+    cache_view_state = gr.State(False)
+
+    def toggle_cache_view(is_open):
+        if is_open:
+            return gr.update(visible=False), gr.update(), False
+        return gr.update(visible=True), get_cache_status(), True
+
+    open_cache_btn.click(
+        fn=toggle_cache_view,
+        inputs=[cache_view_state],
+        outputs=[cache_container, cache_info_display, cache_view_state]
+    )
+    close_cache_btn.click(
+        fn=lambda: (gr.update(visible=False), False),
+        outputs=[cache_container, cache_view_state]
+    )
+    cleanup_btn.click(
+        fn=handle_cache_cleanup, 
+        inputs=[cache_limit_slider], 
+        outputs=[cache_mgmt_status, cache_info_display]
+    )
+    clear_btn.click(
+        fn=handle_clear_cache, 
+        outputs=[cache_mgmt_status, cache_info_display]
+    )
+
     enable_diarization.change(
         fn=lambda enabled: gr.update(visible=enabled),
         inputs=[enable_diarization],
@@ -198,6 +216,7 @@ with gr.Blocks(title="Sesten Yazıya", css=_CSS) as demo:
                     enable_diarization, num_speakers_slider],
             outputs=[output_text, download_txt, download_srt, download_vtt,
                      status_text, detected_speakers, preview_text],
+            show_progress="hidden",
         )
         .then(fn=on_finish, outputs=btn_outputs, queue=False)
         .then(fn=lambda: (gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=True)), 

@@ -29,7 +29,10 @@ cfg.TEMP_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 def _fmt(seconds: float, is_sub: bool = False, ms_sep: str = ",") -> str:
     if not is_sub:
-        m, s = divmod(int(seconds), 60)
+        h, remainder = divmod(int(seconds), 3600)
+        m, s = divmod(remainder, 60)
+        if h > 0:
+            return f"{h}:{m:02d}:{s:02d}"
         return f"{m}:{s:02d}"
     
     total_ms = int(round(seconds * 1000))
@@ -64,7 +67,6 @@ def transcribe(
     model_size: str,
     enable_diarization: bool,
     num_speakers: int,
-    progress=gr.Progress(track_tqdm=True),
 ) -> Generator[tuple[str, str | None, str | None, str | None, str, str, str], None, None]:
     """Ses dosyasını Türkçe metne dönüştürür; akış olarak sonuç verir."""
     models.pause_event.clear()
@@ -81,19 +83,23 @@ def transcribe(
 
     # ⚡ Check for cached transcription
     t_hash = get_transcription_hash(audio_path, model_size, enable_diarization, num_speakers)
-    cache_file = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.txt"
+    txt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.txt"
+    srt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.srt"
+    vtt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.vtt"
     
-    if cache_file.exists():
-        logger.info(f"Loading transcription from cache: {cache_file}")
-        cached_text = cache_file.read_text(encoding="utf-8")
+    if txt_cache.exists() and srt_cache.exists() and vtt_cache.exists():
+        logger.info(f"Loading transcription from cache: {t_hash}")
+        cached_text = txt_cache.read_text(encoding="utf-8")
+        cached_srt = srt_cache.read_text(encoding="utf-8")
         
         yield astuple(TranscriptionResult(
             result=cached_text,
-            txt_path=str(cache_file),
-            srt_path=None,
-            vtt_path=None,
+            txt_path=str(txt_cache),
+            srt_path=str(srt_cache),
+            vtt_path=str(vtt_cache),
             status="✅ Önbellekten yüklendi!",
-            speaker_info="⚡ İşlem atlandı"
+            speaker_info="⚡ İşlem atlandı",
+            preview_srt=cached_srt
         ))
         return
 
@@ -130,7 +136,7 @@ def transcribe(
                     status="🔍 Konuşmacılar analiz ediliyor...", speaker_info=""
                 ))
                 def dp(v, desc=""):
-                    progress(v * diar_weight, desc=desc)
+                    pass # Progress tracking removed
                 speaker_timeline, used_cache = diarize(audio_path, int(num_speakers), progress=dp)
                 n = len(set(lbl for _, _, lbl in speaker_timeline))
                 cache_tag = " · ⚡ Önbellek" if used_cache else ""
@@ -214,10 +220,6 @@ def transcribe(
                 else "⏳ Çevriliyor..."
             )
             
-            if duration > 0:
-                p_val = diar_weight + (seg.end / duration) * (0.9 - diar_weight)
-                progress(p_val, desc=f"Metne dönüştürülüyor... {_fmt(seg.end)} / {_fmt(duration)}")
-                
             yield astuple(TranscriptionResult(
                 result=result, 
                 txt_path=None, srt_path=None, vtt_path=None,
@@ -238,25 +240,17 @@ def transcribe(
             ))
             return
 
-        progress(0.9, desc="⏳ Dosyalar kaydediliyor...")
-
         yield astuple(TranscriptionResult(
             result=final_result, 
             txt_path=None, srt_path=None, vtt_path=None,
             status="⏳ Dosya kaydediliyor...", speaker_info=speaker_info))
 
-        def save_temp(content, suffix):
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=suffix, delete=False, encoding="utf-8", dir=cfg.TEMP_EXPORT_DIR
-            ) as f:
-                f.write(content)
-                return f.name
-
-        txt_path = save_temp(final_result, ".txt")
+        # Save results to persistent cache
+        txt_cache.write_text(final_result, encoding="utf-8")
         srt_content = _generate_srt_vtt(all_segments, is_vtt=False, speaker_timeline=speaker_timeline)
-        srt_path = save_temp(srt_content, ".srt")
+        srt_cache.write_text(srt_content, encoding="utf-8")
         vtt_content = _generate_srt_vtt(all_segments, is_vtt=True, speaker_timeline=speaker_timeline)
-        vtt_path = save_temp(vtt_content, ".vtt")
+        vtt_cache.write_text(vtt_content, encoding="utf-8")
 
         speed = f"{duration / elapsed:.1f}x" if elapsed > 0 else "—"
         stats = (
@@ -267,20 +261,12 @@ def transcribe(
             f"- İşlem süresi: {elapsed:.1f} sn\n"
             f"- Hız: {speed}"
         )
-        
-        # ⚡ Save to cache
-        try:
-            cache_file.write_text(final_result, encoding="utf-8")
-        except Exception:
-            logger.exception("Failed to write transcript cache")
             
-        progress(1.0, desc="✅ Tamamlandı")
-
         yield astuple(TranscriptionResult(
             result=final_result, 
-            txt_path=txt_path,
-            srt_path=srt_path,
-            vtt_path=vtt_path,
+            txt_path=str(txt_cache),
+            srt_path=str(srt_cache),
+            vtt_path=str(vtt_cache),
             status=stats, 
             speaker_info=speaker_info,
             preview_srt=srt_content
