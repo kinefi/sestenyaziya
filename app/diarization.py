@@ -1,9 +1,11 @@
 import bisect
+import os
+import tempfile
 from pathlib import Path
 
 import av
 import numpy as np
-from sklearn.cluster import KMeans
+from sklearn.cluster import SpectralClustering
 from sklearn.metrics import silhouette_score
 
 from . import models
@@ -31,14 +33,23 @@ def _auto_detect_k(embeddings: np.ndarray) -> tuple[int, np.ndarray]:
     """Pick the k with the best silhouette score in range [2, 5]."""
     n = len(embeddings)
     best_k, best_score, best_labels = 2, -1.0, None
-    for k in range(2, min(6, n)):
-        labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(embeddings)
+    for k in range(2, min(11, n)): # Increased max clusters for auto-detection to 10
+        # Spectral clustering is more robust for voice embeddings as it identifies 
+        # clusters based on connectivity rather than just spherical distance.
+        model = SpectralClustering(
+            n_clusters=k, 
+            random_state=42, 
+            affinity='nearest_neighbors', 
+            assign_labels='cluster_qr'
+        )
+        labels = model.fit_predict(embeddings)
         if len(set(labels)) > 1:
             score = float(silhouette_score(embeddings, labels))
             if score > best_score:
                 best_score, best_k, best_labels = score, k, labels
     if best_labels is None:
-        best_labels = KMeans(n_clusters=best_k, random_state=42, n_init=10).fit_predict(embeddings)
+        model = SpectralClustering(n_clusters=best_k, random_state=42, affinity='nearest_neighbors', assign_labels='cluster_qr')
+        best_labels = model.fit_predict(embeddings)
     return best_k, best_labels
 
 def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tuple[float, float, str]], bool]:
@@ -81,7 +92,8 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
             m = np.abs(segment).max()
             if m > 0:
                 segment /= (m / 0.9)
-            _, embeds, slices = encoder.embed_utterance(segment, return_partials=True, rate=2)
+            # Lowering rate to 1.2 gives the encoder more audio context per embedding, improving accuracy
+            _, embeds, slices = encoder.embed_utterance(segment, return_partials=True, rate=1.2)
             all_partial_embeds.append(embeds)
             for s in slices:
                 wav_splits.append(slice(s.start + total_processed, s.stop + total_processed))
@@ -102,10 +114,19 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
 
         partial_embeds = np.concatenate(all_partial_embeds, axis=0)
         duration_sec = total_processed / SAMPLE_RATE
-        np.savez(cache_file, embeds=partial_embeds, starts=[s.start for s in wav_splits], stops=[s.stop for s in wav_splits])
+        
+        # Atomic save for numpy files
+        with tempfile.NamedTemporaryFile(dir=cache_file.parent, delete=False, suffix=".npz") as tmp:
+            np.savez(tmp, embeds=partial_embeds, starts=[s.start for s in wav_splits], stops=[s.stop for s in wav_splits])
+            os.replace(tmp.name, cache_file)
 
     if progress:
         progress(0.8, desc="Konuşmacılar gruplandırılıyor...")
+
+    # Unit normalize embeddings for more accurate clustering and silhouette scores
+    norms = np.linalg.norm(partial_embeds, axis=1, keepdims=True)
+    partial_embeds = np.divide(partial_embeds, norms, out=np.zeros_like(partial_embeds), 
+                               where=norms > 1e-6)
 
     n = len(partial_embeds)
     if duration_sec < 2.0 or n < 2 or num_speakers == 1:
@@ -117,7 +138,13 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
             return ([(0.0, duration_sec, "Konuşmacı 1")], False)
     else:
         num_speakers = min(num_speakers, n)
-        best_labels = KMeans(n_clusters=num_speakers, random_state=42, n_init=10).fit_predict(partial_embeds)
+        model = SpectralClustering(
+            n_clusters=num_speakers, 
+            random_state=42, 
+            affinity='nearest_neighbors', 
+            assign_labels='cluster_qr'
+        )
+        best_labels = model.fit_predict(partial_embeds)
 
     seen: dict[int, int] = {}
     def speaking_order(raw: int) -> int:
@@ -133,6 +160,9 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
 
 def dominant_speaker(start: float, end: float, timeline: list[tuple[float, float, str]]) -> str:
     """Returns the speaker with the greatest time overlap in [start, end]."""
+    if not timeline:
+        return "Bilinmeyen"
+
     # Use binary search to find segments starting before the current window ends
     # bisect_left returns the first index where timeline[i][0] >= end
     idx_end = bisect.bisect_left(timeline, (end,))

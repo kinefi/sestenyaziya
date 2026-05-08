@@ -1,6 +1,8 @@
 import logging
 import hashlib
 import shutil
+import os
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,24 @@ def get_transcription_hash(audio_path: str, model_size: str, diarization: bool, 
     file_hash = get_file_hash(audio_path)
     key = f"{file_hash}_{model_size}_{int(diarization)}_{num_speakers}"
     return hashlib.sha256(key.encode()).hexdigest()
+
+def atomic_write_text(path: Path, content: str, encoding: str = "utf-8"):
+    """
+    Writes text content to a temporary file then atomically renames it to 
+    prevent file corruption during crashes.
+    """
+    dir_path = path.parent
+    dir_path.mkdir(parents=True, exist_ok=True)
+    
+    fd, temp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+    try:
+        with os.fdopen(fd, 'w', encoding=encoding) as f:
+            f.write(content)
+        os.replace(temp_path, path)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
 def get_cache_size_mb(directories: list[Path]) -> float:
     """Calculates total size of files in given directories in MB."""

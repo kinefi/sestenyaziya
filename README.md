@@ -10,8 +10,9 @@ Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uyg
 - Model seçimi — small (hızlı), medium (dengeli), large-v3 (kaliteli)
 - Konuşmacı ayrıştırma — her konuşmacı ayrı paragraf olarak etiketlenir (token gerektirmez)
 - Otomatik konuşmacı sayısı tespiti (1-10 arası) veya manuel giriş
-- Otomatik cihaz tespiti (CUDA varsa GPU, yoksa CPU kullanılır) ve hata durumunda CPU'ya geçiş.
+- Otomatik cihaz tespiti (CUDA/GPU veya CPU) ve CUDA hatalarında otomatik CPU (`int8_float32`) fallback.
 - Kalıcı önbellekleme (transkripsiyon ve konuşmacı imzaları için)
+- SHA-256 tabanlı dosya doğrulama ile mükemmel önbellek eşleşmesi.
 - Konuşmacı ayrıştırma sürecinde performans iyileştirmeleri (binary search tabanlı).
 - Transkripsiyon tamamlandığında `.txt`, `.srt` ve `.vtt` formatlarında indirilebilir.
 - Duraklat / Devam et / Durdur desteği
@@ -29,6 +30,16 @@ uv sync
 
 ```bash
 uv run python main.py
+```
+
+### Seçenekler
+
+| Parametre | Açıklama | Varsayılan |
+| --- | --- | --- |
+| `--model` | Whisper model boyutu (small, medium, large-v3) | `medium` |
+| `--port` | Web arayüzü portu | `7860` |
+| `--paragraph-pause` | Paragraf sonu tespiti için saniye | `1.5` |
+| `--share` | Gradio paylaşım linki oluşturur | `False` |
 ```
 
 ### Hot reload (geliştirme)

@@ -31,6 +31,13 @@ def setup_config():
         help="Paragraf sınırı için sessizlik eşiği saniye (varsayılan: %(default)s)",
     )
     parser.add_argument(
+        "--timeout",
+        type=int,
+        default=cfg.TRANSCRIPTION_TIMEOUT,
+        metavar="SEC",
+        help="Tek bir dosya için işlem zaman aşımı (varsayılan: %(default)s)",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=7860,
@@ -55,6 +62,7 @@ def setup_config():
     cfg.DEFAULT_MODEL_SIZE = args.model
     cfg.SAMPLE_RATE = args.sample_rate
     cfg.PARAGRAPH_PAUSE = args.paragraph_pause
+    cfg.TRANSCRIPTION_TIMEOUT = args.timeout
     
     if args.hf_token:
         os.environ["HF_TOKEN"] = args.hf_token
@@ -62,18 +70,18 @@ def setup_config():
     return args
 
 
+args = setup_config()
+cfg.setup_logging()
+
+# Clean up embedding cache on startup
+clean_embedding_cache([cfg.EMBEDDING_CACHE_DIR, cfg.TRANSCRIPT_CACHE_DIR, cfg.TEMP_EXPORT_DIR], 
+                      max_size_mb=cfg.DEFAULT_CACHE_SIZE_MB)
+
+print(f"🖥️  Cihaz: {cfg.device.upper()} | Hesaplama tipi: {cfg.compute_type}")
+
+# Import UI components at module level so Gradio CLI can detect the 'demo' object
+from app.ui import demo, UI_CSS
+demo.queue()
+
 if __name__ == "__main__":
-    args = setup_config()
-    cfg.setup_logging()
-    
-    # Clean up embedding cache on startup (limit to 1GB)
-    clean_embedding_cache([cfg.EMBEDDING_CACHE_DIR, cfg.TRANSCRIPT_CACHE_DIR, cfg.TEMP_EXPORT_DIR], 
-                          max_size_mb=cfg.DEFAULT_CACHE_SIZE_MB)
-    
-    print(f"🖥️  Cihaz: {cfg.device.upper()} | Hesaplama tipi: {cfg.compute_type}")
-
-    # Deferred import: UI components must load AFTER config is mutated
-    from app.ui import demo, UI_CSS
-
-    demo.queue()
     demo.launch(share=args.share, show_error=True, server_port=args.port, css=UI_CSS)

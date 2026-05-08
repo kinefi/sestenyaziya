@@ -19,6 +19,13 @@ class ModelSize(StrEnum):
 DEFAULT_MODEL_SIZE = ModelSize.MEDIUM
 SAMPLE_RATE = 16000
 PARAGRAPH_PAUSE = 1.5
+TRANSCRIPTION_TIMEOUT = 3600  # 1 hour limit for a single file
+
+# Watchdog and Retry Settings
+WATCHDOG_CHECK_INTERVAL = 30  # Seconds
+WATCHDOG_TIMEOUT = 120        # Seconds of inactivity before restart
+RETRY_MAX_ATTEMPTS = 3
+RETRY_INITIAL_DELAY = 2.0     # Base delay for backoff
 
 CACHE_BASE_DIR = Path("cache")
 EMBEDDING_CACHE_DIR = CACHE_BASE_DIR / "embeddings"
@@ -44,4 +51,4 @@ try:
     device = "cuda" if ctranslate2.get_cuda_device_count() > 0 and torch.cuda.is_available() else "cpu"
 except Exception:
     device = "cpu"
-compute_type = "float16" if device == "cuda" else "int8"
+compute_type = "float16" if device == "cuda" else "int8_float32"
