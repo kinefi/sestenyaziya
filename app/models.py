@@ -4,10 +4,12 @@ import threading
 import time
 import random
 from functools import wraps
+from typing import Any
 
 from faster_whisper import WhisperModel
 import ctranslate2 # Import ctranslate2 to check for CUDA availability
-from resemblyzer import VoiceEncoder
+import torch
+import numpy as np
 
 from . import config as cfg
 
@@ -15,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 model: WhisperModel | None = None
 current_model_size: str | None = None
-voice_encoder: VoiceEncoder | None = None
+voice_encoder: "SpeechBrainEncoder | None" = None
 _model_lock = threading.Lock()
 _encoder_lock = threading.Lock()
 pause_event = threading.Event()
@@ -138,15 +140,68 @@ def load_model(model_size: str) -> None:
             current_model_size = None
 
 @retry()
-def _init_voice_encoder():
-    return VoiceEncoder()
+def _init_voice_encoder() -> Any:
+    return SpeechBrainEncoder(device=cfg.device)
 
-def get_voice_encoder() -> VoiceEncoder:
+
+class SpeechBrainEncoder:
+    """
+    A modern replacement for Resemblyzer using SpeechBrain's ECAPA-TDNN model.
+    Provides a compatible API for sliding window embeddings used in diarization.
+    """
+    def __init__(self, device: str):
+        from speechbrain.inference.speaker import EncoderClassifier
+        self.device = device
+        # Use ECAPA-TDNN trained on VoxCeleb, a state-of-the-art speaker embedding model
+        self.classifier = EncoderClassifier.from_hparams(
+            source="speechbrain/spkrec-ecapa-voxceleb",
+            run_opts={"device": device},
+            savedir=str(cfg.MODELS_DIR / "speechbrain")
+        )
+
+    def embed_utterance(self, wav: np.ndarray, return_partials: bool = True, rate: float = 1.3):
+        """
+        Mimics Resemblyzer's embed_utterance API.
+        Returns (full_embedding, partial_embeddings, slices).
+        """
+        sampling_rate = cfg.SAMPLE_RATE
+        window_samples = int(1.6 * sampling_rate) # 1.6s window is standard for d-vectors/x-vectors
+        step_samples = int(sampling_rate / rate)
+        
+        wav_tensor = torch.from_numpy(wav).to(self.device).float()
+        
+        # Full utterance embedding (centroid)
+        with torch.no_grad():
+            full_emb = self.classifier.encode_batch(wav_tensor.unsqueeze(0)).squeeze().cpu().numpy()
+            
+        if not return_partials:
+            return full_emb, None, None
+
+        if len(wav) < window_samples:
+            return full_emb, np.array([full_emb]), [slice(0, len(wav))]
+
+        slices = []
+        batch_chunks = []
+        for i in range(0, len(wav) - window_samples + 1, step_samples):
+            slices.append(slice(i, i + window_samples))
+            batch_chunks.append(wav_tensor[i : i + window_samples])
+            
+        if batch_chunks:
+            # Process all segments in a single batch for high performance
+            stacked = torch.stack(batch_chunks)
+            with torch.no_grad():
+                # encode_batch returns (batch, 1, embedding_dim)
+                embeds = self.classifier.encode_batch(stacked).squeeze(1).cpu().numpy()
+            return full_emb, embeds, slices
+        
+        return full_emb, np.array([]), []
+
+def get_voice_encoder() -> "SpeechBrainEncoder":
     global voice_encoder
     if voice_encoder is None:
         with _encoder_lock:
             if voice_encoder is None:
-                logger.info("Ses encoder (Resemblyzer) yükleniyor...")
+                logger.info("Ses encoder (SpeechBrain) yükleniyor...")
                 voice_encoder = _init_voice_encoder()
                 logger.info("Ses encoder başarıyla yüklendi.")
     return voice_encoder

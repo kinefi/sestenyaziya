@@ -1,7 +1,6 @@
 import bisect
 import os
 import tempfile
-from pathlib import Path
 
 import av
 import numpy as np
@@ -30,15 +29,16 @@ def _stream_audio(audio_path: str):
         return
 
 def _auto_detect_k(embeddings: np.ndarray) -> tuple[int, np.ndarray]:
-    """Pick the k with the best silhouette score in range [2, 5]."""
+    """Pick the k with the best silhouette score in range [2, 10]."""
     n = len(embeddings)
     best_k, best_score, best_labels = 2, -1.0, None
-    for k in range(2, min(11, n)): # Increased max clusters for auto-detection to 10
+    for k in range(2, min(11, n)): # Search up to 10 speakers
         # Spectral clustering is more robust for voice embeddings as it identifies 
         # clusters based on connectivity rather than just spherical distance.
         model = SpectralClustering(
             n_clusters=k, 
             random_state=42, 
+            n_neighbors=min(n - 1, 20),
             affinity='nearest_neighbors', 
             assign_labels='cluster_qr'
         )
@@ -48,7 +48,13 @@ def _auto_detect_k(embeddings: np.ndarray) -> tuple[int, np.ndarray]:
             if score > best_score:
                 best_score, best_k, best_labels = score, k, labels
     if best_labels is None:
-        model = SpectralClustering(n_clusters=best_k, random_state=42, affinity='nearest_neighbors', assign_labels='cluster_qr')
+        model = SpectralClustering(
+            n_clusters=best_k, 
+            random_state=42, 
+            n_neighbors=min(n - 1, 20),
+            affinity='nearest_neighbors', 
+            assign_labels='cluster_qr'
+        )
         best_labels = model.fit_predict(embeddings)
     return best_k, best_labels
 
@@ -92,8 +98,9 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
             m = np.abs(segment).max()
             if m > 0:
                 segment /= (m / 0.9)
-            # Lowering rate to 1.2 gives the encoder more audio context per embedding, improving accuracy
-            _, embeds, slices = encoder.embed_utterance(segment, return_partials=True, rate=1.2)
+            # Increasing rate to 2.5 provides higher temporal resolution (more points), which helps 
+            # resolve boundaries and distinguish speakers in complex scenarios.
+            _, embeds, slices = encoder.embed_utterance(segment, return_partials=True, rate=2.5)
             all_partial_embeds.append(embeds)
             for s in slices:
                 wav_splits.append(slice(s.start + total_processed, s.stop + total_processed))
@@ -141,6 +148,7 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
         model = SpectralClustering(
             n_clusters=num_speakers, 
             random_state=42, 
+            n_neighbors=min(n - 1, 20),
             affinity='nearest_neighbors', 
             assign_labels='cluster_qr'
         )

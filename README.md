@@ -13,7 +13,7 @@ pinned: false
 
 Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uygulaması.
 
-[Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) ile transkripsiyon, [Resemblyzer](https://github.com/resemble-ai/resemblyzer) ile konuşmacı ayrıştırma ve [Gradio](https://www.gradio.app/) ile arayüz sağlar.
+[Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) ile transkripsiyon, [SpeechBrain](https://speechbrain.github.io/) ile konuşmacı ayrıştırma ve [Gradio](https://www.gradio.app/) ile arayüz sağlar.
 
 ## Özellikler
 
@@ -35,7 +35,7 @@ Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uyg
 uv sync
 ```
 
-> İlk çalıştırmada Whisper modeli (~500 MB) ve Resemblyzer encoder'ı (~17 MB) Hugging Face Hub'dan otomatik indirilir.
+> İlk çalıştırmada Whisper modeli (~500 MB) ve SpeechBrain encoder'ı (~85 MB) Hugging Face Hub'dan otomatik indirilir.
 
 ## Kullanım
 
@@ -80,10 +80,10 @@ uv run gradio main.py
 | --- | --- |
 | `faster-whisper` | Hızlı Whisper implementasyonu |
 | `ctranslate2` | Model hızlandırma ve cihaz yönetimi |
-| `resemblyzer` | Konuşmacı gömme vektörleri |
+| `speechbrain` | Konuşmacı gömme vektörleri |
 | `scikit-learn` | KMeans kümeleme (konuşmacı ayrıştırma) |
 | `av` (PyAV) | Bellek dostu ses akışı ve işleme |
-| `torch` (CPU) | Resemblyzer için PyTorch arka ucu |
+| `torch` | SpeechBrain için PyTorch arka ucu |
 | `gradio` | Web arayüzü |
 
 ## HuggingFace Space Deployment
