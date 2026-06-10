@@ -1,3 +1,14 @@
+---
+title: Ses'ten Yazıya
+emoji: 🎤
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: 6.8.0
+python_version: "3.12"
+app_file: main.py
+pinned: false
+---
 # Ses'ten Yazıya
 
 Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uygulaması.
