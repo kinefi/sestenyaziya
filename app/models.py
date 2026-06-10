@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import time
 import random
@@ -152,22 +153,29 @@ def get_voice_encoder() -> VoiceEncoder:
 
 
 def _watchdog_worker():
-    """Background thread that restarts the model if it hangs during processing."""
-    global model, current_model_size
+    """Background thread that restarts the *process* on a genuine native hang.
+
+    An in-process model reload cannot recover a wedged CUDA/ctranslate2 call: the
+    stuck thread is blocked in native code holding the device, and an in-flight job
+    binds its own local model reference, so swapping ``model`` does nothing. The only
+    real recovery is a fresh process, so we exit non-zero and let the supervisor
+    (systemd/docker/k8s) restart a clean one.
+    """
     while True:
         time.sleep(cfg.WATCHDOG_CHECK_INTERVAL)
         if is_processing and model is not None:
             elapsed = time.time() - last_heartbeat
             if elapsed > cfg.WATCHDOG_TIMEOUT:
-                logger.error(f"Watchdog detected unresponsiveness ({elapsed:.0f}s). Restarting model...")
-                with _model_lock:
-                    # Force reload on next attempt
-                    temp_size = current_model_size
-                    model = None
-                    current_model_size = None
-                    if temp_size:
-                        load_model(temp_size)
-                heartbeat()
+                logger.critical(
+                    f"Watchdog: no progress for {elapsed:.0f}s (limit "
+                    f"{cfg.WATCHDOG_TIMEOUT}s). Process is wedged; exiting "
+                    f"{cfg.WATCHDOG_EXIT_CODE} for supervisor restart."
+                )
+                # The main thread is stuck in native code and cannot be signalled
+                # cooperatively; flush logs and hard-exit. os._exit (not sys.exit)
+                # is required to terminate the process from a daemon thread.
+                logging.shutdown()
+                os._exit(cfg.WATCHDOG_EXIT_CODE)
 
 # Start watchdog thread as a daemon so it exits with the main program
 threading.Thread(target=_watchdog_worker, daemon=True).start()

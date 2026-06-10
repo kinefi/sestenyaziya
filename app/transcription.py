@@ -113,8 +113,8 @@ def transcribe(
         ))
         models.load_model(model_size)
 
-    # Bind a stable local reference. The watchdog thread may null/reload
-    # models.model concurrently; the in-flight job must not see that mutation.
+    # Bind a stable local reference so a concurrent load_model() swap can't be
+    # seen mid-job.
     whisper_model = models.model
     if whisper_model is None:
         yield astuple(TranscriptionResult(

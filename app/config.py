@@ -23,7 +23,12 @@ TRANSCRIPTION_TIMEOUT = 3600  # 1 hour limit for a single file
 
 # Watchdog and Retry Settings
 WATCHDOG_CHECK_INTERVAL = 30  # Seconds
-WATCHDOG_TIMEOUT = 120        # Seconds of inactivity before restart
+# No-progress grace period before declaring a genuine native hang. Must sit
+# comfortably above worst-case first-segment latency (VAD pass + first decode
+# at beam_size=5 across all temperatures on CPU/large-v3), which can run for
+# minutes on long files. The old 120s tripped on healthy long jobs.
+WATCHDOG_TIMEOUT = 600        # Seconds with zero heartbeats before process restart
+WATCHDOG_EXIT_CODE = 42       # Non-zero exit so the supervisor restarts the process
 RETRY_MAX_ATTEMPTS = 3
 RETRY_INITIAL_DELAY = 2.0     # Base delay for backoff
 
