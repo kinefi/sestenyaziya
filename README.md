@@ -4,8 +4,8 @@ emoji: 🎤
 colorFrom: blue
 colorTo: green
 sdk: gradio
-sdk_version: 6.8.0
-python_version: "3.12"
+sdk_version: "6.17.3"
+python_version: "3.13"
 app_file: main.py
 pinned: false
 ---
@@ -85,3 +85,23 @@ uv run gradio main.py
 | `av` (PyAV) | Bellek dostu ses akışı ve işleme |
 | `torch` (CPU) | Resemblyzer için PyTorch arka ucu |
 | `gradio` | Web arayüzü |
+
+## HuggingFace Space Deployment
+
+Öncelikle space deposu ek remote olarak eklenmeli:
+
+    git remote add space https://huggingface.co/spaces/tekrei/sestenyaziya
+
+Daha sonra yeni sürümler de oraya itilebilir:
+
+    git push --force space main
+
+İtmeden önce bağımlılıklar yenilenmelidir:
+
+    ./generate_requirements.sh
+
+Yapılandırma bilgileri için: <https://huggingface.co/docs/hub/spaces-config-reference>
+
+`sdk_version`, [requirements.txt](./requirements.txt) içindeki Gradio sürümüne eşit olmalıdır.
+
+İşlem başarılı olursa uygulamaya şuradan erişilebilir: <https://huggingface.co/spaces/tekrei/sestenyaziya>
