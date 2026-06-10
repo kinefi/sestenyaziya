@@ -171,7 +171,7 @@ class SpeechBrainEncoder:
         wav_tensor = torch.from_numpy(wav).to(self.device).float()
         
         # Full utterance embedding (centroid)
-        with torch.no_grad():
+        with torch.inference_mode():
             full_emb = self.classifier.encode_batch(wav_tensor.unsqueeze(0)).squeeze().cpu().numpy()
             
         if not return_partials:
@@ -189,7 +189,7 @@ class SpeechBrainEncoder:
         if batch_chunks:
             # Process all segments in a single batch for high performance
             stacked = torch.stack(batch_chunks)
-            with torch.no_grad():
+            with torch.inference_mode():
                 # encode_batch returns (batch, 1, embedding_dim)
                 embeds = self.classifier.encode_batch(stacked).squeeze(1).cpu().numpy()
             return full_emb, embeds, slices
