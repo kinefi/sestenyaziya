@@ -113,9 +113,12 @@ def transcribe(
         ))
         models.load_model(model_size)
 
-    if models.model is None:
+    # Bind a stable local reference. The watchdog thread may null/reload
+    # models.model concurrently; the in-flight job must not see that mutation.
+    whisper_model = models.model
+    if whisper_model is None:
         yield astuple(TranscriptionResult(
-            result="❌ Hata: Model yüklenemedi. Logları kontrol edin.", 
+            result="❌ Hata: Model yüklenemedi. Logları kontrol edin.",
             txt_path=None, srt_path=None, vtt_path=None,
             status="", speaker_info=""
         ))
@@ -137,6 +140,7 @@ def transcribe(
                 
                 # Pass a simple lambda to update status for diarization progress
                 def progress_callback(pct, desc=""):
+                    models.heartbeat()  # keep watchdog from nulling the model mid-diarization
                     logger.info(f"Diarization: {pct*100:.0f}% - {desc}")
 
                 speaker_timeline, used_cache = diarize(audio_path, int(num_speakers), progress=progress_callback)
@@ -159,12 +163,19 @@ def transcribe(
             speaker_info=speaker_info
         ))
 
-        segments, info = models.model.transcribe(
+        segments, info = whisper_model.transcribe(
             str(audio_path),
             language="tr",
-            beam_size=1,
+            beam_size=5,
+            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            condition_on_previous_text=False,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
             vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
             word_timestamps=False,
+            initial_prompt="Türkçe konuşma kaydı. Noktalama ve büyük harf kullanımı.",
         )
 
         duration = info.duration
