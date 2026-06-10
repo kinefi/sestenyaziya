@@ -8,10 +8,11 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
 from . import models
-from .config import SAMPLE_RATE, EMBEDDING_CACHE_DIR
 from .cache_utils import get_file_hash
+from .config import EMBEDDING_CACHE_DIR, SAMPLE_RATE
 
 EMBEDDING_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def _stream_audio(audio_path: str):
     """Yields audio chunks from the file to avoid loading everything at once."""
@@ -28,17 +29,19 @@ def _stream_audio(audio_path: str):
     except (av.AVError, UnicodeDecodeError):
         return
 
+
 def _auto_detect_k(embeddings: np.ndarray) -> tuple[int, np.ndarray]:
     """Fast auto-detection of speaker count using KMeans."""
     n = len(embeddings)
     best_k, best_score, best_labels = 2, -1.0, None
-    
+
     # Sample embeddings if there are too many to speed up silhouette calculation
     sample_indices = np.random.choice(n, min(n, 1000), replace=False) if n > 1000 else np.arange(n)
     eval_embeddings = embeddings[sample_indices]
 
-    for k in range(2, min(11, n)): # Search up to 10 speakers
-        model = KMeans(n_clusters=k, random_state=42, n_init=5)
+    # Search up to 10 speakers or the number of samples available
+    for k in range(2, min(11, n)):
+        model = KMeans(n_clusters=k, random_state=42, n_init="auto")
         labels = model.fit_predict(embeddings)
         if len(set(labels)) > 1:
             # Calculate silhouette on sample for speed
@@ -46,14 +49,20 @@ def _auto_detect_k(embeddings: np.ndarray) -> tuple[int, np.ndarray]:
             if score > best_score:
                 best_score, best_k, best_labels = score, k, labels
     if best_labels is None:
-        model = KMeans(n_clusters=best_k, random_state=42, n_init=5)
+        model = KMeans(n_clusters=best_k, random_state=42, n_init="auto")
         best_labels = model.fit_predict(embeddings)
     return best_k, best_labels
 
-def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tuple[float, float, str]], bool]:
+
+def diarize(
+    audio_path: str,
+    num_speakers: int,
+    low_latency: bool = False,
+    progress=None,
+) -> tuple[list[tuple[float, float, str]], bool]:
     """Returns (start_sec, end_sec, speaker_label) segments covering the full audio."""
-    encoder = models.get_voice_encoder()
-    
+    encoder = models.get_voice_encoder(low_latency=low_latency)
+
     if progress:
         progress(0.1, desc="Ses dosyası yükleniyor...")
 
@@ -69,13 +78,13 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
         is_cached = True
         with np.load(cache_file, allow_pickle=True) as data:
             partial_embeds = data["embeds"]
-            wav_splits = [slice(start, stop) for start, stop in zip(data["starts"], data["stops"])]
+            wav_splits = [slice(start, stop) for start, stop in zip(data["starts"], data["stops"], strict=False)]
             if wav_splits:
                 duration_sec = wav_splits[-1].stop / SAMPLE_RATE
     else:
         if progress:
             progress(0.3, desc="Konuşmacı imzaları çıkarılıyor...")
-        
+
         all_partial_embeds = []
         current_samples = []
         current_count = 0
@@ -89,10 +98,10 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
             segment = np.concatenate(current_samples).astype(np.float32)
             m = np.abs(segment).max()
             if m > 0:
-                segment /= (m / 0.9)
-            # Rate 1.5 - 2.0 provides a good balance between speed and temporal resolution.
-            # Higher rate means more neural network passes (slower).
-            _, embeds, slices = encoder.embed_utterance(segment, return_partials=True, rate=2.0)
+                segment /= m / 0.9
+            # Lowering rate to 1.0 significantly speeds up extraction by reducing
+            # forward passes by 50% compared to rate=2.0.
+            _, embeds, slices = encoder.embed_utterance(segment, return_partials=True, rate=1.0)
             all_partial_embeds.append(embeds)
             for s in slices:
                 wav_splits.append(slice(s.start + total_processed, s.stop + total_processed))
@@ -113,10 +122,15 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
 
         partial_embeds = np.concatenate(all_partial_embeds, axis=0)
         duration_sec = total_processed / SAMPLE_RATE
-        
+
         # Atomic save for numpy files
         with tempfile.NamedTemporaryFile(dir=cache_file.parent, delete=False, suffix=".npz") as tmp:
-            np.savez(tmp, embeds=partial_embeds, starts=[s.start for s in wav_splits], stops=[s.stop for s in wav_splits])
+            np.savez(
+                tmp,
+                embeds=partial_embeds,
+                starts=[s.start for s in wav_splits],
+                stops=[s.stop for s in wav_splits],
+            )
             os.replace(tmp.name, cache_file)
 
     if progress:
@@ -124,8 +138,12 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
 
     # Unit normalize embeddings for more accurate clustering and silhouette scores
     norms = np.linalg.norm(partial_embeds, axis=1, keepdims=True)
-    partial_embeds = np.divide(partial_embeds, norms, out=np.zeros_like(partial_embeds), 
-                               where=norms > 1e-6)
+    partial_embeds = np.divide(
+        partial_embeds,
+        norms,
+        out=np.zeros_like(partial_embeds),
+        where=norms > 1e-6,
+    )
 
     n = len(partial_embeds)
     if duration_sec < 2.0 or n < 2 or num_speakers == 1:
@@ -141,16 +159,22 @@ def diarize(audio_path: str, num_speakers: int, progress=None) -> tuple[list[tup
         best_labels = model.fit_predict(partial_embeds)
 
     seen: dict[int, int] = {}
+
     def speaking_order(raw: int) -> int:
         if raw not in seen:
             seen[raw] = len(seen) + 1
         return seen[raw]
 
     segments = [
-        (split.start / SAMPLE_RATE, split.stop / SAMPLE_RATE, f"Konuşmacı {speaking_order(int(lbl))}")
-        for split, lbl in zip(wav_splits, best_labels)
+        (
+            split.start / SAMPLE_RATE,
+            split.stop / SAMPLE_RATE,
+            f"Konuşmacı {speaking_order(int(lbl))}",
+        )
+        for split, lbl in zip(wav_splits, best_labels, strict=False)
     ]
     return segments, is_cached
+
 
 def dominant_speaker(start: float, end: float, timeline: list[tuple[float, float, str]]) -> str:
     """Returns the speaker with the greatest time overlap in [start, end]."""
@@ -160,22 +184,22 @@ def dominant_speaker(start: float, end: float, timeline: list[tuple[float, float
     # Use binary search to find segments starting before the current window ends
     # bisect_left returns the first index where timeline[i][0] >= end
     idx_end = bisect.bisect_left(timeline, (end,))
-    
-    # Find approximate start index and look back one segment to catch overlaps 
+
+    # Find approximate start index and look back one segment to catch overlaps
     # that started before the 'start' timestamp.
     idx_start = bisect.bisect_left(timeline, (start,))
     search_start = max(0, idx_start - 1)
-    
+
     votes: dict[str, float] = {}
     for i in range(search_start, idx_end):
         t0, t1, speaker = timeline[i]
         overlap = min(end, t1) - max(start, t0)
         if overlap > 0:
             votes[speaker] = votes.get(speaker, 0.0) + overlap
-            
+
     if votes:
         return max(votes, key=lambda k: votes[k])
-        
+
     mid = (start + end) / 2.0
     # Fallback to the closest segment using the sliced window
     search_range = timeline[search_start : idx_end + 1] or timeline

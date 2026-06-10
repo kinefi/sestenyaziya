@@ -1,9 +1,11 @@
 import logging
+import os
 import sys
-from pathlib import Path
-import ctranslate2
-import torch # Import torch to check for CUDA availability
 from enum import StrEnum
+from pathlib import Path
+
+import ctranslate2
+import torch  # Import torch to check for CUDA availability
 
 
 class ModelSize(StrEnum):
@@ -27,26 +29,30 @@ WATCHDOG_CHECK_INTERVAL = 30  # Seconds
 # comfortably above worst-case first-segment latency (VAD pass + first decode
 # at beam_size=5 across all temperatures on CPU/large-v3), which can run for
 # minutes on long files. The old 120s tripped on healthy long jobs.
-WATCHDOG_TIMEOUT = 600        # Seconds with zero heartbeats before process restart
-WATCHDOG_EXIT_CODE = 42       # Non-zero exit so the supervisor restarts the process
+WATCHDOG_TIMEOUT = 600  # Seconds with zero heartbeats before process restart
+WATCHDOG_EXIT_CODE = 42  # Non-zero exit so the supervisor restarts the process
 RETRY_MAX_ATTEMPTS = 3
-RETRY_INITIAL_DELAY = 2.0     # Base delay for backoff
+RETRY_INITIAL_DELAY = 2.0  # Base delay for backoff
+DIARIZATION_BATCH_SIZE = 32  # Optimal for CPU multi-core utilization
+ENCODER_STD = "speechbrain/spkrec-ecapa-voxceleb"
+ENCODER_FAST = "speechbrain/spkrec-xvect-voxceleb"
 
-CACHE_BASE_DIR = Path("cache")
+# Allow overriding the cache directory via environment variable for easier deployment
+CACHE_BASE_DIR = Path(os.getenv("CACHE_DIR", "cache"))
 EMBEDDING_CACHE_DIR = CACHE_BASE_DIR / "embeddings"
 TRANSCRIPT_CACHE_DIR = CACHE_BASE_DIR / "transcriptions"
-MODELS_DIR = Path("models")
+# Models can be large (~5GB+ total), so allowing an independent mount point is recommended
+MODELS_DIR = Path(os.getenv("MODELS_DIR", CACHE_BASE_DIR / "models"))
 TEMP_EXPORT_DIR = CACHE_BASE_DIR / "temp_exports"
 DEFAULT_CACHE_SIZE_MB = 1000
+
 
 def setup_logging():
     """Configures the global logging settings."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stderr)
-        ]
+        handlers=[logging.StreamHandler(sys.stderr)],
     )
     # Reduce logging verbosity for httpx
     logging.getLogger("httpx").setLevel(logging.WARNING)

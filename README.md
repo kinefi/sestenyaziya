@@ -37,7 +37,7 @@ Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uyg
 uv sync
 ```
 
-> İlk çalıştırmada Whisper modeli (~500 MB) ve SpeechBrain encoder'ı (~85 MB) Hugging Face Hub'dan otomatik indirilir.
+> İlk çalıştırmada Whisper modeli (small: ~480 MB, medium: ~1.5 GB, large-v3: ~3 GB) ve SpeechBrain encoder'ı (~85 MB) Hugging Face Hub'dan otomatik indirilir.
 
 ## Kullanım
 

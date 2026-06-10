@@ -25,3 +25,19 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
 torchaudio = { index = "pytorch-cpu" }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.3.0",
+    "pre-commit>=3.6.0",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# E/F: Pyflakes/Error, I: isort, N: pep8-naming, UP: pyupgrade, B: flake8-bugbear
+select = ["E", "F", "I", "N", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]

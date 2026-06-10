@@ -1,11 +1,24 @@
 import gradio as gr
 
 from . import models
-from .config import (ModelSize, DEFAULT_MODEL_SIZE, device,
-                     EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR, CACHE_BASE_DIR, DEFAULT_CACHE_SIZE_MB)
-from .config import TRANSCRIPTION_TIMEOUT
+from .cache_utils import (
+    clean_embedding_cache,
+    clear_all_cache,
+    get_cache_size_mb,
+)
+from .config import (
+    CACHE_BASE_DIR,
+    DEFAULT_CACHE_SIZE_MB,
+    DEFAULT_MODEL_SIZE,
+    EMBEDDING_CACHE_DIR,
+    MODELS_DIR,
+    TRANSCRIPT_CACHE_DIR,
+    TRANSCRIPTION_TIMEOUT,
+    ModelSize,
+    device,
+)
 from .transcription import transcribe
-from .cache_utils import clear_all_cache, clean_embedding_cache, get_cache_size_mb
+
 
 def toggle_pause():
     if models.pause_event.is_set():
@@ -19,12 +32,16 @@ def toggle_pause():
 def on_start():
     return (
         gr.update(interactive=False),  # submit_btn
-        gr.update(interactive=True),   # pause_btn
-        gr.update(interactive=True),   # stop_btn
-        "",                            # Clear detected speakers
+        gr.update(interactive=True),  # pause_btn
+        gr.update(interactive=True),  # stop_btn
+        "",  # Clear detected speakers
         gr.update(interactive=False),  # enable_diarization
         gr.update(interactive=False),  # num_speakers_slider
+        gr.update(visible=False),  # copy_btn
+        gr.update(interactive=False),  # low_latency_chk
+        0,  # progress_bar reset
     )
+
 
 def on_diarization_change(enabled):
     return gr.update(visible=enabled)
@@ -35,8 +52,10 @@ def on_finish():
         gr.update(interactive=True),
         gr.update(interactive=False, value="⏸️ Duraklat"),
         gr.update(interactive=False),
-        gr.update(interactive=True),   # enable_diarization
-        gr.update(interactive=True),   # num_speakers_slider
+        gr.update(interactive=True),  # enable_diarization
+        gr.update(interactive=True),  # num_speakers_slider
+        gr.update(interactive=True),  # low_latency_chk
+        gr.update(visible=True),  # copy_btn
     )
 
 
@@ -49,21 +68,43 @@ def get_cache_status():
     size = get_cache_size_mb([EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR])
     return f"📊 Mevcut Önbellek: **{size:.2f} MB**"
 
+
 def handle_clear_cache():
     clear_all_cache(CACHE_BASE_DIR)
     return "🗑️ Önbellek temizlendi.", get_cache_status()
 
+
+def _format_size(size_mb: float) -> str:
+    """Formats size in MB to either MB or GB string."""
+    if size_mb >= 1024:
+        return f"{size_mb / 1024:.2f} GB"
+    return f"{size_mb:.1f} MB"
+
+
 def update_health_dashboard():
     stats = models.get_health_status()
+    transcription_cache = get_cache_size_mb([EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR])
+    model_cache = get_cache_size_mb([MODELS_DIR])
+
     return f"""
     ### 🏥 Sistem Sağlığı
     | Parametre | Durum |
     | :--- | :--- |
     | **İşlem / Watchdog** | {stats['is_processing']} / {stats['watchdog_status']} |
-    | **Model / Cihaz** | `{stats['model_loaded']}` / {stats['device']} |
-    | **CUDA / Son Sinyal** | {stats['cuda_status']} / {stats['last_seen']} |
+    | **Whisper / Encoder** | `{stats['model_loaded']}` / `{stats['encoder_loaded']}` |
+    | **Cihaz / CUDA** | `{stats['device']}` / {stats['cuda_status']} |
+    | **Son Sinyal** | {stats['last_seen']} |
     | **Süre Sınırı / Kalan** | {TRANSCRIPTION_TIMEOUT}s / {stats['timeout_remaining']} |
+    | **Veri Önbelleği** | {_format_size(transcription_cache)} |
+    | **Model Önbelleği** | {_format_size(model_cache)} |
     """
+
+
+def update_char_count(text: str) -> str:
+    """Calculates and returns the character count of the given text."""
+    count = len(text) if text else 0
+    return f"📝 Karakter sayısı: **{count}**"
+
 
 def handle_cache_cleanup(limit):
     clean_embedding_cache([EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR], max_size_mb=limit)
@@ -101,7 +142,6 @@ UI_CSS = """
 """
 
 with gr.Blocks(title="Sesten Yazıya") as demo:
-
     with gr.Row():
         gr.Markdown(f"""
                     # 🎙️ Sesten Yazıya
@@ -111,27 +151,30 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                     """)
 
     with gr.Row(equal_height=True):
-
         # 1) Audio file, model size, settings
         with gr.Column(scale=1, min_width=200):
-
             audio_input = gr.Audio(
                 label="Ses Dosyası",
                 type="filepath",
                 sources=["upload"],
-                elem_id="audio_input"
+                elem_id="audio_input",
             )
             model_selector = gr.Dropdown(
                 choices=ModelSize.values(),
                 value=DEFAULT_MODEL_SIZE,
-                label="Model  (small: hızlı · medium: dengeli · large-v3: kaliteli)",
-                elem_id="model_selector"
+                label=("Model Seçimi (" "small: ~480MB · " "medium: ~1.5GB · " "large-v3: ~3.0GB)"),
+                elem_id="model_selector",
             )
 
             enable_diarization = gr.Checkbox(
                 label="Konuşmacıları ayırt et",
                 value=False,
-                elem_id="chk_enable_diarization"
+                elem_id="chk_enable_diarization",
+            )
+            low_latency_chk = gr.Checkbox(
+                label="🚀 Turbo Mod (Düşük Gecikmeli Transkripsiyon)",
+                value=False,
+                elem_id="chk_low_latency",
             )
             with gr.Row(visible=False, elem_id="row_diarization_settings") as diarization_row:
                 num_speakers_slider = gr.Slider(
@@ -140,7 +183,7 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                     step=1,
                     value=0,
                     label="Konuşmacı sayısı (0 = otomatik algıla)",
-                    elem_id="sld_num_speakers"
+                    elem_id="sld_num_speakers",
                 )
 
             detected_speakers = gr.Markdown("", elem_id="md_speakers")
@@ -153,24 +196,25 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 placeholder="Sonuçlar konuşma algılandıkça buraya akacak...",
                 lines=20,
                 interactive=False,
-                elem_id="txt_output"
+                elem_id="txt_output",
             )
-            download_txt = gr.DownloadButton("📥 TXT İndir", interactive=False, elem_id="dl_txt")
-
-        # 3) SRT preview
-        with gr.Column(scale=1, min_width=200):
-            preview_text = gr.Textbox(
-                label="Dosya Önizleme (SRT/VTT)",
-                placeholder="İşlem tamamlandığında SRT/VTT önizlemesi burada görünecek...",
-                lines=20,
+            char_counter = gr.Markdown("📝 Karakter sayısı: **0**", elem_id="char_counter")
+            progress_bar = gr.Slider(
+                label="İşlem İlerlemesi (%)",
+                minimum=0,
+                maximum=100,
+                value=0,
                 interactive=False,
-                elem_id="txt_preview"
+                elem_id="progress_bar",
             )
             with gr.Row():
+                copy_btn = gr.Button("📋 Metni Kopyala", visible=False, elem_id="btn_copy")
+            with gr.Row():
+                download_txt = gr.DownloadButton("📥 TXT", interactive=False, elem_id="dl_txt")
                 download_srt = gr.DownloadButton("📥 SRT İndir", interactive=False, elem_id="dl_srt")
                 download_vtt = gr.DownloadButton("📥 VTT İndir", interactive=False, elem_id="dl_vtt")
 
-        # 4) Health and Cache Settings (Rightmost Column)
+        # 3) Health and Cache Settings (Rightmost Column)
         with gr.Column(scale=1, min_width=200):
             health_dashboard = gr.Markdown(update_health_dashboard())
             gr.Timer(5).tick(update_health_dashboard, outputs=health_dashboard)
@@ -180,33 +224,39 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 gr.Markdown("### ⚙️ Önbellek Yönetimi")
                 cache_info_display = gr.Markdown(get_cache_status())
                 cache_limit_slider = gr.Slider(
-                    minimum=100, maximum=5000, step=100,
+                    minimum=100,
+                    maximum=5000,
+                    step=100,
                     value=DEFAULT_CACHE_SIZE_MB,
-                    label="Boyut Sınırı (MB)"
+                    label="Boyut Sınırı (MB)",
                 )
                 with gr.Row():
                     cleanup_btn = gr.Button("🧹 Temizle", scale=1, elem_id="btn_cleanup")
-                    clear_btn = gr.Button("🗑️ Tümünü Sil", variant="stop", scale=1, elem_id="btn_clear")
+                    clear_btn = gr.Button(
+                        "🗑️ Tümünü Sil",
+                        variant="stop",
+                        scale=1,
+                        elem_id="btn_clear",
+                    )
                 cache_mgmt_status = gr.Label(value="", label="Durum")
 
     with gr.Row():
         submit_btn = gr.Button("✨ Başlat", variant="primary", scale=2, elem_id="btn_submit")
         pause_btn = gr.Button("⏸️ Duraklat", interactive=False, scale=1, elem_id="btn_pause")
         stop_btn = gr.Button(
-            "⏹️ Durdur", variant="stop", 
-            interactive=False, scale=1,
-            elem_id="btn_stop"
+            "⏹️ Durdur",
+            variant="stop",
+            interactive=False,
+            scale=1,
+            elem_id="btn_stop",
         )
 
     cleanup_btn.click(
-        fn=handle_cache_cleanup, 
-        inputs=[cache_limit_slider], 
-        outputs=[cache_mgmt_status, cache_info_display]
+        fn=handle_cache_cleanup,
+        inputs=[cache_limit_slider],
+        outputs=[cache_mgmt_status, cache_info_display],
     )
-    clear_btn.click(
-        fn=handle_clear_cache, 
-        outputs=[cache_mgmt_status, cache_info_display]
-    )
+    clear_btn.click(fn=handle_clear_cache, outputs=[cache_mgmt_status, cache_info_display])
 
     enable_diarization.change(
         fn=on_diarization_change,
@@ -218,28 +268,82 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
     audio_input.change(
         fn=lambda: (gr.update(interactive=True), gr.update(interactive=True)),
         outputs=[enable_diarization, num_speakers_slider],
-        queue=False
+        queue=False,
     )
 
-    btn_outputs = [submit_btn, pause_btn, stop_btn, enable_diarization, num_speakers_slider]
+    btn_outputs = [
+        submit_btn,
+        pause_btn,
+        stop_btn,
+        enable_diarization,
+        num_speakers_slider,
+        copy_btn,
+    ]
+
+    # 7 Outputs to match the new TranscriptionResult dataclass
+    transcribe_outputs = [
+        output_text,
+        download_txt,
+        download_srt,
+        download_vtt,
+        status_text,
+        detected_speakers,
+        progress_bar,
+    ]
 
     (
         submit_btn.click(
             fn=on_start,
-            outputs=[submit_btn, pause_btn, stop_btn, detected_speakers, enable_diarization, num_speakers_slider],
+            outputs=[
+                submit_btn,
+                pause_btn,
+                stop_btn,
+                detected_speakers,
+                enable_diarization,
+                num_speakers_slider,
+                copy_btn,
+                progress_bar,
+            ],
             queue=True,
         )
         .then(
             fn=transcribe,
-            inputs=[audio_input, model_selector,
-                    enable_diarization, num_speakers_slider],
-            outputs=[output_text, download_txt, download_srt, download_vtt,
-                     status_text, detected_speakers, preview_text],
+            inputs=[
+                audio_input,
+                model_selector,
+                enable_diarization,
+                num_speakers_slider,
+                low_latency_chk,
+            ],
+            outputs=transcribe_outputs,
             show_progress="hidden",
         )
         .then(fn=on_finish, outputs=btn_outputs, queue=False)
-        .then(fn=lambda: (gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=True)), 
-              outputs=[download_txt, download_srt, download_vtt], queue=False)
+        .then(
+            fn=lambda: (
+                gr.update(interactive=True),
+                gr.update(interactive=True),
+                gr.update(interactive=True),
+            ),
+            outputs=[download_txt, download_srt, download_vtt],
+            queue=False,
+        )
     )
     stop_btn.click(fn=on_stop, outputs=btn_outputs, queue=False)
     pause_btn.click(fn=toggle_pause, outputs=[pause_btn])
+
+    # Copy to clipboard logic via Browser JS
+    copy_btn.click(
+        fn=None,
+        js="(text) => { navigator.clipboard.writeText(text); }",
+        inputs=[output_text],
+        queue=False,
+    )
+
+    # Live character counter
+    output_text.change(
+        fn=update_char_count,
+        inputs=[output_text],
+        outputs=[char_counter],
+        queue=False,
+    )

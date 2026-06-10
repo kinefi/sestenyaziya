@@ -1,18 +1,17 @@
 import logging
-import tempfile
+import os
 import time
-from pathlib import Path
-import gradio as gr
-from dataclasses import dataclass, astuple
-from typing import Generator
+from collections.abc import Generator
+from dataclasses import astuple, dataclass
 
 from . import config as cfg
 from . import models
-from .config import device, PARAGRAPH_PAUSE
+from .cache_utils import atomic_write_text, get_transcription_hash
+from .config import PARAGRAPH_PAUSE, device
 from .diarization import diarize, dominant_speaker
-from .cache_utils import get_transcription_hash, atomic_write_text
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class TranscriptionResult:
@@ -22,10 +21,12 @@ class TranscriptionResult:
     vtt_path: str | None
     status: str
     speaker_info: str
-    preview_srt: str = ""
+    progress: float = 0.0
+
 
 cfg.TRANSCRIPT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 cfg.TEMP_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def _fmt(seconds: float, is_sub: bool = False, ms_sep: str = ",") -> str:
     if not is_sub:
@@ -34,22 +35,23 @@ def _fmt(seconds: float, is_sub: bool = False, ms_sep: str = ",") -> str:
         if h > 0:
             return f"{h}:{m:02d}:{s:02d}"
         return f"{m}:{s:02d}"
-    
+
     total_ms = int(round(seconds * 1000))
     ms = total_ms % 1000
     s = (total_ms // 1000) % 60
     m = (total_ms // (1000 * 60)) % 60
-    h = (total_ms // (1000 * 60 * 60))
+    h = total_ms // (1000 * 60 * 60)
     return f"{h:02d}:{m:02d}:{s:02d}{ms_sep}{ms:03d}"
+
 
 def _generate_srt_vtt(segments: list, is_vtt: bool = False, speaker_timeline=None) -> str:
     output = "WEBVTT\n\n" if is_vtt else ""
     sep = "." if is_vtt else ","
-    
+
     for i, seg in enumerate(segments, 1):
         start_str = _fmt(seg.start, True, sep)
         end_str = _fmt(seg.end, True, sep)
-        
+
         speaker_prefix = ""
         if speaker_timeline:
             speaker = dominant_speaker(seg.start, seg.end, speaker_timeline)
@@ -67,106 +69,147 @@ def transcribe(
     model_size: str,
     enable_diarization: bool,
     num_speakers: int,
-) -> Generator[tuple[str, str | None, str | None, str | None, str, str, str], None, None]:
+    low_latency: bool = False,
+) -> Generator[tuple[str, str | None, str | None, str | None, str, str, float]]:
     """Ses dosyasını Türkçe metne dönüştürür; akış olarak sonuç verir."""
     models.pause_event.clear()
     models.stop_event.clear()
     models.set_processing_state(True)
 
-    # Validate inputs before doing any expensive work.
-    if audio_path is None:
-        yield astuple(TranscriptionResult(
-            result="⚠️ Lütfen bir ses dosyası yükleyin.", 
-            txt_path=None, srt_path=None, vtt_path=None,
-            status="", speaker_info=""
-        ))
-        models.set_processing_state(False)
-        return
-
-    # ⚡ Check for cached transcription
-    t_hash = get_transcription_hash(audio_path, model_size, enable_diarization, num_speakers)
-    txt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.txt"
-    srt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.srt"
-    vtt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.vtt"
-    
-    if txt_cache.exists() and srt_cache.exists() and vtt_cache.exists():
-        logger.info(f"Loading transcription from cache: {t_hash}")
-        cached_text = txt_cache.read_text(encoding="utf-8")
-        cached_srt = srt_cache.read_text(encoding="utf-8")
-        
-        yield astuple(TranscriptionResult(
-            result=cached_text,
-            txt_path=str(txt_cache),
-            srt_path=str(srt_cache),
-            vtt_path=str(vtt_cache),
-            status="✅ Önbellekten yüklendi!",
-            speaker_info="⚡ İşlem atlandı",
-            preview_srt=cached_srt
-        ))
-        models.set_processing_state(False)
-        return
-
-    if models.current_model_size != model_size or models.model is None:
-        yield astuple(TranscriptionResult(
-            result="", txt_path=None, srt_path=None, vtt_path=None,
-            status="🔄 Model yükleniyor, lütfen bekleyin...", speaker_info=""
-        ))
-        models.load_model(model_size)
-
-    # Bind a stable local reference so a concurrent load_model() swap can't be
-    # seen mid-job.
-    whisper_model = models.model
-    if whisper_model is None:
-        yield astuple(TranscriptionResult(
-            result="❌ Hata: Model yüklenemedi. Logları kontrol edin.",
-            txt_path=None, srt_path=None, vtt_path=None,
-            status="", speaker_info=""
-        ))
-        models.set_processing_state(False)
-        return
-
-    result = ""
+    speaker_info = ""  # Initialize early for error/early exit paths
     try:
+        # Validate inputs before doing any expensive work.
+        if audio_path is None:
+            yield astuple(
+                TranscriptionResult(
+                    result="⚠️ Lütfen bir ses dosyası yükleyin.",
+                    txt_path=None,
+                    srt_path=None,
+                    vtt_path=None,
+                    status="",
+                    speaker_info="",
+                    progress=0.0,
+                )
+            )
+            return
+
+        # ⚡ Check for cached transcription
+        t_hash = get_transcription_hash(audio_path, model_size, enable_diarization, num_speakers)
+        txt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.txt"
+        srt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.srt"
+        vtt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.vtt"
+
+        if txt_cache.exists() and srt_cache.exists() and vtt_cache.exists():
+            logger.info(f"Loading transcription from cache: {t_hash}")
+            cached_text = txt_cache.read_text(encoding="utf-8")
+
+            yield astuple(
+                TranscriptionResult(
+                    result=cached_text,
+                    txt_path=str(txt_cache),
+                    srt_path=str(srt_cache),
+                    vtt_path=str(vtt_cache),
+                    status="✅ Önbellekten yüklendi!",
+                    speaker_info="⚡ İşlem atlandı",
+                    progress=100.0,
+                )
+            )
+            return
+
+        if models.current_model_size != model_size or models.model is None:
+            yield astuple(
+                TranscriptionResult(
+                    result="",
+                    txt_path=None,
+                    srt_path=None,
+                    vtt_path=None,
+                    status="🔄 Model yükleniyor, lütfen bekleyin...",
+                    speaker_info="",
+                    progress=0.0,
+                )
+            )
+            models.load_model(model_size)
+
+        # Bind a stable local reference
+        whisper_model = models.model
+        if whisper_model is None:
+            yield astuple(
+                TranscriptionResult(
+                    result="❌ Hata: Model yüklenemedi. Logları kontrol edin.",
+                    txt_path=None,
+                    srt_path=None,
+                    vtt_path=None,
+                    status="",
+                    speaker_info="",
+                    progress=0.0,
+                )
+            )
+            return
+
+        result = ""
         start_time = time.time()
 
         speaker_timeline: list[tuple[float, float, str]] | None = None
-        speaker_info = ""
         if enable_diarization:
             try:
-                yield astuple(TranscriptionResult(
-                    result="", txt_path=None, srt_path=None, vtt_path=None,
-                    status="🔍 Konuşmacılar analiz ediliyor...", speaker_info=""
-                ))
-                
-                # Pass a simple lambda to update status for diarization progress
-                def progress_callback(pct, desc=""):
-                    models.heartbeat()  # keep watchdog from nulling the model mid-diarization
-                    logger.info(f"Diarization: {pct*100:.0f}% - {desc}")
+                yield astuple(
+                    TranscriptionResult(
+                        result="",
+                        txt_path=None,
+                        srt_path=None,
+                        vtt_path=None,
+                        status="🔍 Konuşmacılar analiz ediliyor...",
+                        speaker_info="",
+                        progress=5.0,
+                    )
+                )
 
-                speaker_timeline, used_cache = diarize(audio_path, int(num_speakers), progress=progress_callback)
+                def progress_callback(pct, desc=""):
+                    models.heartbeat()
+                    logger.info(f"Diarization: {pct * 100:.0f}% - {desc}")
+
+                speaker_timeline, used_cache = diarize(
+                    audio_path,
+                    int(num_speakers),
+                    low_latency=low_latency,
+                    progress=progress_callback,
+                )
                 n = len(set(lbl for _, _, lbl in speaker_timeline))
                 cache_tag = " · ⚡ Önbellek" if used_cache else ""
                 speaker_info = f"👥 {n} konuşmacı algılandı{cache_tag}"
             except Exception as e:
                 logger.exception("Konuşmacı ayrıştırma sırasında hata oluştu")
-                yield astuple(TranscriptionResult(
-                    result="",
-                    txt_path=None, srt_path=None, vtt_path=None,
-                    status=f"⚠️ Konuşmacı ayrıştırma başarısız ({type(e).__name__}: {e}), düz metin devam ediliyor...",
-                    speaker_info=""
-                ))
+                yield astuple(
+                    TranscriptionResult(
+                        result="",
+                        txt_path=None,
+                        srt_path=None,
+                        vtt_path=None,
+                        status=f"⚠️ Konuşmacı ayrıştırma başarısız ({type(e).__name__}: {e}),\
+                            düz metin devam ediliyor...",
+                        speaker_info="",
+                        progress=10.0,
+                    )
+                )
 
-        yield astuple(TranscriptionResult(
-            result="", 
-            txt_path=None, srt_path=None, vtt_path=None,
-            status="⏳ Transkripsiyon başlatılıyor...", 
-            speaker_info=speaker_info
-        ))
+        yield astuple(
+            TranscriptionResult(
+                result="",
+                txt_path=None,
+                srt_path=None,
+                vtt_path=None,
+                status="⏳ Transkripsiyon başlatılıyor...",
+                speaker_info=speaker_info,
+                progress=10.0,
+            )
+        )
+
+        current_beam_size = 1 if low_latency else 5
 
         segments, info = whisper_model.transcribe(
             str(audio_path),
             language="tr",
-            beam_size=5,
+            beam_size=current_beam_size,
             temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
             condition_on_previous_text=False,
             compression_ratio_threshold=2.4,
@@ -179,41 +222,56 @@ def transcribe(
         )
 
         duration = info.duration
-        # paragraphs[i] holds the stripped segment texts for the i-th paragraph.
-        # Using a list-of-lists avoids O(n²) string concatenation while streaming.
         paragraphs: list[list[str]] = [[]]
-        # Parts for diarized result: list of (speaker, text) or just strings
         diarized_parts: list[str] = []
         last_speaker: str | None = None
         last_end = 0.0
         all_segments = []
 
         for seg in segments:
-            # Signal to watchdog that we are still alive
             models.heartbeat()
-            
-            # Check for total processing timeout
             if time.time() - start_time > cfg.TRANSCRIPTION_TIMEOUT:
                 logger.error(f"Transcription timed out after {cfg.TRANSCRIPTION_TIMEOUT} seconds.")
-                yield astuple(TranscriptionResult(
-                    result=result, txt_path=None, srt_path=None, vtt_path=None, 
-                    status="❌ Hata: İşlem zaman aşımına uğradı.", speaker_info=speaker_info))
+                yield astuple(
+                    TranscriptionResult(
+                        result=result,
+                        txt_path=None,
+                        srt_path=None,
+                        vtt_path=None,
+                        status="❌ Hata: İşlem zaman aşımına uğradı.",
+                        speaker_info=speaker_info,
+                    )
+                )
                 return
 
             all_segments.append(seg)
             if models.stop_event.is_set():
-                yield astuple(TranscriptionResult(
-                    result=result, txt_path=None, srt_path=None, vtt_path=None, 
-                    status="⏹️ Durduruldu.", speaker_info=speaker_info))
+                yield astuple(
+                    TranscriptionResult(
+                        result=result,
+                        txt_path=None,
+                        srt_path=None,
+                        vtt_path=None,
+                        status="⏹️ Durduruldu.",
+                        speaker_info=speaker_info,
+                    )
+                )
                 return
 
             if models.pause_event.is_set():
-                yield astuple(TranscriptionResult(
-                    result=result, txt_path=None, srt_path=None, vtt_path=None, 
-                    status="⏸️ Duraklatıldı...", speaker_info=speaker_info))
+                yield astuple(
+                    TranscriptionResult(
+                        result=result,
+                        txt_path=None,
+                        srt_path=None,
+                        vtt_path=None,
+                        status="⏸️ Duraklatıldı...",
+                        speaker_info=speaker_info,
+                    )
+                )
                 while models.pause_event.is_set() and not models.stop_event.is_set():
                     time.sleep(0.1)
-            
+
             gap = seg.start - last_end if seg.start > last_end else 0.0
             last_end = seg.end
 
@@ -238,38 +296,52 @@ def transcribe(
                 paragraphs[-1].append(seg.text.strip())
                 result = "\n\n".join(" ".join(p) for p in paragraphs if p)
 
-            status = (
-                f"⏳ Çözümleniyor... {_fmt(seg.end)} / {_fmt(duration)}"
-                if duration > 0
-                else "⏳ Çözümleniyor..."
+            status = f"⏳ Çözümleniyor... {_fmt(seg.end)} / {_fmt(duration)}" if duration > 0 else "⏳ Çözümleniyor..."
+            progress_pct = (seg.end / duration * 100) if duration > 0 else 0
+
+            yield astuple(
+                TranscriptionResult(
+                    result=result,
+                    txt_path=None,
+                    srt_path=None,
+                    vtt_path=None,
+                    status=status,
+                    speaker_info=speaker_info,
+                    progress=progress_pct,
+                )
             )
-            
-            yield astuple(TranscriptionResult(
-                result=result, 
-                txt_path=None, srt_path=None, vtt_path=None,
-                status=status, speaker_info=speaker_info))
 
         elapsed = time.time() - start_time
         final_result = (
-            "".join(diarized_parts)
-            if speaker_timeline
-            else "\n\n".join(" ".join(p) for p in paragraphs if p)
+            "".join(diarized_parts) if speaker_timeline else "\n\n".join(" ".join(p) for p in paragraphs if p)
         )
 
         if not final_result:
-            yield astuple(TranscriptionResult(
-                result="⚠️ Ses dosyasında konuşma algılanamadı.", 
-                txt_path=None, srt_path=None, vtt_path=None,
-                status="", speaker_info=speaker_info
-            ))
+            yield astuple(
+                TranscriptionResult(
+                    result="⚠️ Ses dosyasında konuşma algılanamadı.",
+                    txt_path=None,
+                    srt_path=None,
+                    vtt_path=None,
+                    status="",
+                    speaker_info=speaker_info,
+                    progress=100.0,
+                )
+            )
             return
 
-        yield astuple(TranscriptionResult(
-            result=final_result, 
-            txt_path=None, srt_path=None, vtt_path=None,
-            status="⏳ Dosya kaydediliyor...", speaker_info=speaker_info))
+        yield astuple(
+            TranscriptionResult(
+                result=final_result,
+                txt_path=None,
+                srt_path=None,
+                vtt_path=None,
+                status="⏳ Dosya kaydediliyor...",
+                speaker_info=speaker_info,
+                progress=95.0,
+            )
+        )
 
-        # Save results to persistent cache
         atomic_write_text(txt_cache, final_result)
         srt_content = _generate_srt_vtt(all_segments, is_vtt=False, speaker_timeline=speaker_timeline)
         atomic_write_text(srt_cache, srt_content)
@@ -285,23 +357,37 @@ def transcribe(
             f"- İşlem süresi: {elapsed:.1f} sn\n"
             f"- Hız: {speed}"
         )
-            
-        yield astuple(TranscriptionResult(
-            result=final_result, 
-            txt_path=str(txt_cache),
-            srt_path=str(srt_cache),
-            vtt_path=str(vtt_cache),
-            status=stats, 
-            speaker_info=speaker_info,
-            preview_srt=srt_content
-        ))
+
+        yield astuple(
+            TranscriptionResult(
+                result=final_result,
+                txt_path=str(txt_cache),
+                srt_path=str(srt_cache),
+                vtt_path=str(vtt_cache),
+                status=stats,
+                speaker_info=speaker_info,
+                progress=100.0,
+            )
+        )
 
     except Exception as e:
         logger.exception("Transkripsiyon işlemi sırasında beklenmedik hata")
-        yield astuple(TranscriptionResult(
-            result=f"❌ Bir hata oluştu: {str(e)}", 
-            txt_path=None, srt_path=None, vtt_path=None,
-            status="", speaker_info=""
-        ))
+        yield astuple(
+            TranscriptionResult(
+                result=f"❌ Bir hata oluştu: {str(e)}",
+                txt_path=None,
+                srt_path=None,
+                vtt_path=None,
+                status="",
+                speaker_info="",
+                progress=0.0,
+            )
+        )
     finally:
         models.set_processing_state(False)
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+                logger.info(f"Yüklenen dosya temizlendi: {audio_path}")
+            except Exception as e:
+                logger.warning(f"Geçici dosya silinemedi {audio_path}: {e}")

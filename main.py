@@ -6,6 +6,7 @@ import os
 import app.config as cfg
 from app.cache_utils import clean_embedding_cache
 
+
 def setup_config():
     """Parses CLI arguments and updates global configuration."""
     parser = argparse.ArgumentParser(description="Ses'ten Yazıya — Türkçe konuşmayı metne dönüştürür")
@@ -63,7 +64,7 @@ def setup_config():
     cfg.SAMPLE_RATE = args.sample_rate
     cfg.PARAGRAPH_PAUSE = args.paragraph_pause
     cfg.TRANSCRIPTION_TIMEOUT = args.timeout
-    
+
     if args.hf_token:
         os.environ["HF_TOKEN"] = args.hf_token
 
@@ -74,13 +75,16 @@ args = setup_config()
 cfg.setup_logging()
 
 # Clean up embedding cache on startup
-clean_embedding_cache([cfg.EMBEDDING_CACHE_DIR, cfg.TRANSCRIPT_CACHE_DIR, cfg.TEMP_EXPORT_DIR], 
-                      max_size_mb=cfg.DEFAULT_CACHE_SIZE_MB)
+clean_embedding_cache(
+    [cfg.EMBEDDING_CACHE_DIR, cfg.TRANSCRIPT_CACHE_DIR, cfg.TEMP_EXPORT_DIR],
+    max_size_mb=cfg.DEFAULT_CACHE_SIZE_MB,
+)
 
 print(f"🖥️  Cihaz: {cfg.device.upper()} | Hesaplama tipi: {cfg.compute_type}")
 
 # Import UI components at module level so Gradio CLI can detect the 'demo' object
-from app.ui import demo, UI_CSS
+from app.ui import UI_CSS, demo  # noqa: E402
+
 demo.queue()
 
 if __name__ == "__main__":
