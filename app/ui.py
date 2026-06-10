@@ -107,7 +107,7 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                     # 🎙️ Sesten Yazıya
                     Yapay zeka ile Türkçe ses kayıtlarını metne dönüştürün &nbsp;•&nbsp; {device.upper()}.
                     Sonuçlar anlık ekrana düşer. Model değiştirilirse ilk çalıştırmada yeniden yüklenir.
-                    [Kaynak kodu inceleyebilirsiniz.](https://github.com/tekrei/sestenyaziya)
+                    [Kaynak kodu inceleyebilirsiniz.](https://github.com/kinefi/sestenyaziya)
                     """)
 
     with gr.Row(equal_height=True):

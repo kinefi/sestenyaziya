@@ -11,6 +11,8 @@ pinned: false
 ---
 # Ses'ten Yazıya
 
+[![Sesten Yazıya](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/tekrei/sestenyaziya)
+
 Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uygulaması.
 
 [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) ile transkripsiyon, [SpeechBrain](https://speechbrain.github.io/) ile konuşmacı ayrıştırma ve [Gradio](https://www.gradio.app/) ile arayüz sağlar.
