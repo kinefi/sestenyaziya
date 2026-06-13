@@ -33,6 +33,10 @@ Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uyg
 
 ## Kurulum
 
+Öncelikle [uv paket yöneticisini](https://docs.astral.sh/uv/getting-started/installation/) kurmak gerekiyor. Python destekleyen her işletim sisteminde çalışır.
+
+Daha sonra ihtiyaç duyduğu ortamı hazırlamak gerekir:
+
 ```bash
 uv sync
 ```
