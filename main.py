@@ -88,4 +88,9 @@ from app.ui import UI_CSS, demo  # noqa: E402
 demo.queue()
 
 if __name__ == "__main__":
-    demo.launch(share=args.share, show_error=True, server_port=args.port, css=UI_CSS)
+    demo.launch(
+        share=args.share,
+        show_error=True,
+        server_port=args.port,
+        css=UI_CSS,
+    )

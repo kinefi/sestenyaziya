@@ -27,6 +27,7 @@ stop_event = threading.Event()
 # Watchdog state
 last_heartbeat = time.time()
 task_start_time = 0.0
+active_timeout = cfg.TRANSCRIPTION_TIMEOUT
 is_processing = False
 
 
@@ -93,13 +94,14 @@ def heartbeat():
     last_heartbeat = time.time()
 
 
-def set_processing_state(state: bool):
+def set_processing_state(state: bool, timeout: int = None):
     """Toggles processing state for watchdog monitoring."""
-    global is_processing, task_start_time
+    global is_processing, task_start_time, active_timeout
     is_processing = state
     if state:
         heartbeat()
         task_start_time = time.time()
+        active_timeout = timeout if timeout is not None else cfg.TRANSCRIPTION_TIMEOUT
 
 
 @retry()
@@ -298,9 +300,11 @@ def get_health_status() -> dict:
             encoder_info = "Belirlenemedi"
 
     remaining = "—"
+    remaining_raw = None
     if is_processing:
         elapsed = time.time() - task_start_time
-        remaining = f"{max(0, cfg.TRANSCRIPTION_TIMEOUT - elapsed):.0f}s"
+        remaining_raw = max(0, active_timeout - elapsed)
+        remaining = f"{remaining_raw:.0f}s"
 
     return {
         "device": cfg.device.upper(),
@@ -314,4 +318,6 @@ def get_health_status() -> dict:
         "last_seen": f"{watchdog_delta:.1f}s önce",
         "cuda_status": "✅ Hazır" if cuda_healthy else "❌ Hata",
         "timeout_remaining": remaining,
+        "remaining_raw": remaining_raw,
+        "active_timeout": active_timeout,
     }

@@ -1,23 +1,25 @@
+import logging
+import os
+
 import gradio as gr
 
 from . import models
 from .cache_utils import (
-    clean_embedding_cache,
-    clear_all_cache,
     get_cache_size_mb,
 )
 from .config import (
-    CACHE_BASE_DIR,
-    DEFAULT_CACHE_SIZE_MB,
     DEFAULT_MODEL_SIZE,
     EMBEDDING_CACHE_DIR,
     MODELS_DIR,
+    SUPPORTED_LANGUAGES,
     TRANSCRIPT_CACHE_DIR,
     TRANSCRIPTION_TIMEOUT,
     ModelSize,
     device,
 )
 from .transcription import transcribe
+
+logger = logging.getLogger(__name__)
 
 
 def toggle_pause():
@@ -29,16 +31,48 @@ def toggle_pause():
         return gr.update(value="▶️ Devam Et")
 
 
+def handle_audio_change(new_path, old_path):
+    """Yeni bir dosya yüklendiğinde veya temizlendiğinde eskisini diskten siler."""
+    if old_path and old_path != new_path and os.path.exists(old_path):
+        try:
+            os.remove(old_path)
+        except Exception:
+            pass
+    return new_path
+
+
+def clear_outputs():
+    """Yeni bir dosya yüklendiğinde veya temizlendiğinde eski sonuç alanlarını sıfırlar."""
+    return (
+        "",  # output_text
+        "",  # status_text
+        "",  # detected_speakers
+        0,  # progress_bar
+        gr.update(interactive=False),  # session_clear_btn
+        gr.update(value=None, interactive=False),  # download_txt
+        gr.update(value=None, interactive=False),  # download_srt
+        gr.update(value=None, interactive=False),  # download_vtt
+    )
+
+
 def on_start():
     return (
         gr.update(interactive=False),  # submit_btn
         gr.update(interactive=True),  # pause_btn
         gr.update(interactive=True),  # stop_btn
-        "",  # Clear detected speakers
+        "",  # detected_speakers
         gr.update(interactive=False),  # enable_diarization
         gr.update(interactive=False),  # num_speakers_slider
         gr.update(visible=False),  # copy_btn
+        gr.update(interactive=False),  # session_clear_btn
         gr.update(interactive=False),  # low_latency_chk
+        gr.update(interactive=False),  # timeout_slider
+        gr.update(interactive=False),  # audio_input
+        gr.update(interactive=False),  # model_selector
+        gr.update(interactive=False),  # language_selector
+        gr.update(interactive=False),  # download_txt
+        gr.update(interactive=False),  # download_srt
+        gr.update(interactive=False),  # download_vtt
         0,  # progress_bar reset
     )
 
@@ -55,23 +89,21 @@ def on_finish():
         gr.update(interactive=True),  # enable_diarization
         gr.update(interactive=True),  # num_speakers_slider
         gr.update(interactive=True),  # low_latency_chk
+        gr.update(interactive=True),  # timeout_slider
         gr.update(visible=True),  # copy_btn
+        gr.update(interactive=True),  # session_clear_btn
+        gr.update(interactive=True),  # audio_input
+        gr.update(interactive=True),  # model_selector
+        gr.update(interactive=True),  # language_selector
+        gr.update(interactive=True),  # download_txt
+        gr.update(interactive=True),  # download_srt
+        gr.update(interactive=True),  # download_vtt
     )
 
 
 def on_stop():
     models.stop_event.set()
     return on_finish()
-
-
-def get_cache_status():
-    size = get_cache_size_mb([EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR])
-    return f"📊 Mevcut Önbellek: **{size:.2f} MB**"
-
-
-def handle_clear_cache():
-    clear_all_cache(CACHE_BASE_DIR)
-    return "🗑️ Önbellek temizlendi.", get_cache_status()
 
 
 def _format_size(size_mb: float) -> str:
@@ -81,10 +113,55 @@ def _format_size(size_mb: float) -> str:
     return f"{size_mb:.1f} MB"
 
 
+def handle_session_cleanup(audio_path, txt_path, srt_path, vtt_path):
+    """Mevcut oturum dosyasını ve üretilen çıktıları siler, UI'ı sıfırlar."""
+    # If all paths are None (user cancelled the JS prompt), skip the update
+    if not any([audio_path, txt_path, srt_path, vtt_path]):
+        return (
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            "",
+        )
+
+    files_to_delete = [audio_path, txt_path, srt_path, vtt_path]
+    for p in files_to_delete:
+        if p and isinstance(p, str) and os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+    logger.info(f"Oturum temizlendi. Silinen dosya sayısı: {len(files_to_delete)}")
+    return (
+        None,  # audio_input
+        "",  # output_text
+        "",  # status_text
+        "",  # detected_speakers
+        0,  # progress_bar
+        gr.update(interactive=False),  # session_clear_btn
+        gr.update(value=None, interactive=False),  # download_txt
+        gr.update(value=None, interactive=False),  # download_srt
+        gr.update(value=None, interactive=False),  # download_vtt
+        "🗑️ Oturum verileri ve geçici dosyalar temizlendi.",
+    )
+
+
 def update_health_dashboard():
     stats = models.get_health_status()
     transcription_cache = get_cache_size_mb([EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR])
     model_cache = get_cache_size_mb([MODELS_DIR])
+
+    time_display = stats["timeout_remaining"]
+    # Apply red highlighting if time is below 60 seconds
+    if stats.get("remaining_raw") is not None and stats["remaining_raw"] < 60:
+        time_display = f"<span style='color: #ff4b4b; font-weight: bold;'>{time_display} ⚠️</span>"
 
     return f"""
     ### 🏥 Sistem Sağlığı
@@ -94,7 +171,7 @@ def update_health_dashboard():
     | **Whisper / Encoder** | `{stats['model_loaded']}` / `{stats['encoder_loaded']}` |
     | **Cihaz / CUDA** | `{stats['device']}` / {stats['cuda_status']} |
     | **Son Sinyal** | {stats['last_seen']} |
-    | **Süre Sınırı / Kalan** | {TRANSCRIPTION_TIMEOUT}s / {stats['timeout_remaining']} |
+    | **Süre Sınırı / Kalan** | {stats['active_timeout']}s / {time_display} |
     | **Veri Önbelleği** | {_format_size(transcription_cache)} |
     | **Model Önbelleği** | {_format_size(model_cache)} |
     """
@@ -106,9 +183,9 @@ def update_char_count(text: str) -> str:
     return f"📝 Karakter sayısı: **{count}**"
 
 
-def handle_cache_cleanup(limit):
-    clean_embedding_cache([EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR], max_size_mb=limit)
-    return f"🧹 Temizlik yapıldı (Sınır: {limit} MB)", get_cache_status()
+def sync_copy_button_on_load(text: str):
+    """Sayfa yüklendiğinde çıktı kutusunda metin varsa kopyalama butonunu görünür yapar."""
+    return gr.update(visible=bool(text and text.strip()))
 
 
 UI_CSS = """
@@ -142,6 +219,28 @@ UI_CSS = """
 """
 
 with gr.Blocks(title="Sesten Yazıya") as demo:
+    last_audio_path = gr.State("")
+    # Persistent Session ID via Browser localStorage
+    session_id = gr.Textbox(visible=False, elem_id="session_id_storage")
+
+    # Logic to load session_id from localStorage or create a new one
+    demo.load(
+        fn=None,
+        js="""
+        () => {
+            let sid = localStorage.getItem('sestenyaziya_session_id');
+            if (!sid) {
+                sid = 'sess_' + (window.crypto && window.crypto.randomUUID 
+                    ? window.crypto.randomUUID() 
+                    : Math.random().toString(36).substring(2, 15));
+                localStorage.setItem('sestenyaziya_session_id', sid);
+            }
+            return sid;
+        }
+        """,
+        outputs=[session_id],
+    )
+
     with gr.Row():
         gr.Markdown(f"""
                     # 🎙️ Sesten Yazıya
@@ -154,7 +253,7 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
         # 1) Audio file, model size, settings
         with gr.Column(scale=1, min_width=200):
             audio_input = gr.Audio(
-                label="Ses Dosyası",
+                label="Ses Dosyası (Yeni dosya yüklemek önceki sonuçları siler)",
                 type="filepath",
                 sources=["upload"],
                 elem_id="audio_input",
@@ -164,6 +263,12 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 value=DEFAULT_MODEL_SIZE,
                 label=("Model Seçimi (" "small: ~480MB · " "medium: ~1.5GB · " "large-v3: ~3.0GB)"),
                 elem_id="model_selector",
+            )
+            language_selector = gr.Dropdown(
+                choices=SUPPORTED_LANGUAGES,
+                value="tr",
+                label="Dil Seçimi",
+                elem_id="language_selector",
             )
 
             enable_diarization = gr.Checkbox(
@@ -175,6 +280,14 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 label="🚀 Turbo Mod (Düşük Gecikmeli Transkripsiyon)",
                 value=False,
                 elem_id="chk_low_latency",
+            )
+            timeout_slider = gr.Slider(
+                minimum=300,
+                maximum=7200,
+                step=300,
+                value=TRANSCRIPTION_TIMEOUT,
+                label="Maksimum İşlem Süresi (Saniye)",
+                elem_id="sld_timeout",
             )
             with gr.Row(visible=False, elem_id="row_diarization_settings") as diarization_row:
                 num_speakers_slider = gr.Slider(
@@ -219,26 +332,9 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
             health_dashboard = gr.Markdown(update_health_dashboard())
             gr.Timer(5).tick(update_health_dashboard, outputs=health_dashboard)
 
-            # --- Cache Management Pane ---
-            with gr.Group():
-                gr.Markdown("### ⚙️ Önbellek Yönetimi")
-                cache_info_display = gr.Markdown(get_cache_status())
-                cache_limit_slider = gr.Slider(
-                    minimum=100,
-                    maximum=5000,
-                    step=100,
-                    value=DEFAULT_CACHE_SIZE_MB,
-                    label="Boyut Sınırı (MB)",
-                )
-                with gr.Row():
-                    cleanup_btn = gr.Button("🧹 Temizle", scale=1, elem_id="btn_cleanup")
-                    clear_btn = gr.Button(
-                        "🗑️ Tümünü Sil",
-                        variant="stop",
-                        scale=1,
-                        elem_id="btn_clear",
-                    )
-                cache_mgmt_status = gr.Label(value="", label="Durum")
+            session_clear_btn = gr.Button("🗑️ Oturumu Temizle", interactive=False, variant="secondary")
+
+            cache_mgmt_status = gr.Label(value="", label="İşlem Durumu", visible=False)
 
     with gr.Row():
         submit_btn = gr.Button("✨ Başlat", variant="primary", scale=2, elem_id="btn_submit")
@@ -251,13 +347,6 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
             elem_id="btn_stop",
         )
 
-    cleanup_btn.click(
-        fn=handle_cache_cleanup,
-        inputs=[cache_limit_slider],
-        outputs=[cache_mgmt_status, cache_info_display],
-    )
-    clear_btn.click(fn=handle_clear_cache, outputs=[cache_mgmt_status, cache_info_display])
-
     enable_diarization.change(
         fn=on_diarization_change,
         inputs=[enable_diarization],
@@ -265,9 +354,21 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
     )
 
     # Event for loading new audio or clearing current one
+    audio_input.change(handle_audio_change, [audio_input, last_audio_path], [last_audio_path])
     audio_input.change(
-        fn=lambda: (gr.update(interactive=True), gr.update(interactive=True)),
-        outputs=[enable_diarization, num_speakers_slider],
+        fn=lambda: (gr.update(interactive=True), gr.update(interactive=True), *clear_outputs()),
+        outputs=[
+            enable_diarization,
+            num_speakers_slider,
+            output_text,
+            status_text,
+            detected_speakers,
+            progress_bar,
+            session_clear_btn,
+            download_txt,
+            download_srt,
+            download_vtt,
+        ],
         queue=False,
     )
 
@@ -277,7 +378,16 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
         stop_btn,
         enable_diarization,
         num_speakers_slider,
+        low_latency_chk,
+        timeout_slider,
         copy_btn,
+        session_clear_btn,
+        audio_input,
+        model_selector,
+        language_selector,
+        download_txt,
+        download_srt,
+        download_vtt,
     ]
 
     # 7 Outputs to match the new TranscriptionResult dataclass
@@ -302,6 +412,15 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 enable_diarization,
                 num_speakers_slider,
                 copy_btn,
+                session_clear_btn,
+                low_latency_chk,
+                timeout_slider,
+                audio_input,
+                model_selector,
+                language_selector,
+                download_txt,
+                download_srt,
+                download_vtt,
                 progress_bar,
             ],
             queue=True,
@@ -313,23 +432,62 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 model_selector,
                 enable_diarization,
                 num_speakers_slider,
+                session_id,
+                timeout_slider,
+                language_selector,
                 low_latency_chk,
             ],
             outputs=transcribe_outputs,
-            show_progress="hidden",
+            show_progress="full",
         )
         .then(fn=on_finish, outputs=btn_outputs, queue=False)
         .then(
-            fn=lambda: (
-                gr.update(interactive=True),
-                gr.update(interactive=True),
-                gr.update(interactive=True),
-            ),
-            outputs=[download_txt, download_srt, download_vtt],
-            queue=False,
+            fn=None,
+            js="""
+            (txt_path) => {
+                if (txt_path && typeof txt_path === 'string' && 
+                    confirm("Transkripsiyon tamamlandı. TXT dosyasını şimdi indirmek ister misiniz?")) {
+                        const link = document.createElement('a');
+                        link.href = window.location.origin + '/file=' + txt_path;
+                        link.download = txt_path.split('/').pop();
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                }
+            }
+            """,
+            inputs=[download_txt],
         )
     )
     stop_btn.click(fn=on_stop, outputs=btn_outputs, queue=False)
+
+    session_clear_btn.click(
+        fn=handle_session_cleanup,
+        js="""
+        (audio, txt, srt, vtt) => {
+            const msg = "Oturum verilerini ve üretilen tüm dosyaları kalıcı olarak silmek istediğinize emin misiniz?";
+            if (!confirm(msg)) {
+                return [null, null, null, null];
+            }
+            navigator.clipboard.writeText("");
+            return [audio, txt, srt, vtt];
+        }
+        """,
+        inputs=[last_audio_path, download_txt, download_srt, download_vtt],
+        outputs=[
+            audio_input,
+            output_text,
+            status_text,
+            detected_speakers,
+            progress_bar,
+            session_clear_btn,
+            download_txt,
+            download_srt,
+            download_vtt,
+            cache_mgmt_status,
+        ],
+    )
+
     pause_btn.click(fn=toggle_pause, outputs=[pause_btn])
 
     # Copy to clipboard logic via Browser JS
@@ -345,5 +503,18 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
         fn=update_char_count,
         inputs=[output_text],
         outputs=[char_counter],
+        queue=False,
+    )
+
+    # Automatic cleanup when the user closes the browser tab or the session expires
+    demo.unload(
+        fn=lambda: logger.info("Oturum bağlantısı kesildi (Tarayıcı sekmesi kapatıldı)."),
+    )
+
+    # Sayfa yenilendiğinde sonuç kutusunda metin varsa kopyalama butonunu göster
+    demo.load(
+        fn=sync_copy_button_on_load,
+        inputs=[output_text],
+        outputs=[copy_btn],
         queue=False,
     )

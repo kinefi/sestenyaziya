@@ -1,11 +1,15 @@
 import logging
 import os
 import sys
+import warnings
 from enum import StrEnum
 from pathlib import Path
 
 import ctranslate2
 import torch  # Import torch to check for CUDA availability
+
+# Suppress Starlette/Gradio deprecation warnings regarding HTTP status codes immediately
+warnings.filterwarnings("ignore", message=".*HTTP_422_UNPROCESSABLE_ENTITY.*")
 
 
 class ModelSize(StrEnum):
@@ -22,6 +26,16 @@ DEFAULT_MODEL_SIZE = ModelSize.MEDIUM
 SAMPLE_RATE = 16000
 PARAGRAPH_PAUSE = 1.5
 TRANSCRIPTION_TIMEOUT = 3600  # 1 hour limit for a single file
+
+SUPPORTED_LANGUAGES = [
+    ("Türkçe", "tr"),
+    ("English", "en"),
+    ("Deutsch", "de"),
+    ("Français", "fr"),
+    ("Español", "es"),
+    ("Italiano", "it"),
+    ("Otomatik Algıla", None),
+]
 
 # Watchdog and Retry Settings
 WATCHDOG_CHECK_INTERVAL = 30  # Seconds

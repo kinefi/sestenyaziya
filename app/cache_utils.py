@@ -19,10 +19,17 @@ def get_file_hash(path: str) -> str:
     return hasher.hexdigest()
 
 
-def get_transcription_hash(audio_path: str, model_size: str, diarization: bool, num_speakers: int) -> str:
+def get_transcription_hash(
+    audio_path: str,
+    model_size: str,
+    diarization: bool,
+    num_speakers: int,
+    session_id: str = "",
+    language: str = "",
+) -> str:
     """Generates a hash for a specific transcription configuration."""
     file_hash = get_file_hash(audio_path)
-    key = f"{file_hash}_{model_size}_{int(diarization)}_{num_speakers}"
+    key = f"{session_id}_{file_hash}_{model_size}_{int(diarization)}_{num_speakers}_{language}"
     return hashlib.sha256(key.encode()).hexdigest()
 
 
