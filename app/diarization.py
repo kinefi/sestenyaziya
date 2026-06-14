@@ -11,7 +11,7 @@ from sklearn.metrics import silhouette_score
 
 from app.config import EMBEDDING_CACHE_DIR, settings
 
-from .cache_utils import get_file_hash
+from .cache_utils import get_embedding_hash
 from .encoder import get_voice_encoder
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,7 @@ def _auto_detect_k(embeddings: np.ndarray) -> tuple[int, np.ndarray]:
 def diarize(
     audio_path: str,
     num_speakers: int,
+    session_id: str = "",
     low_latency: bool = False,
     progress=None,
 ) -> tuple[list[tuple[float, float, str]], bool]:
@@ -72,8 +73,8 @@ def diarize(
     if progress:
         progress(0.1, desc="Ses dosyası yükleniyor...")
 
-    file_hash = get_file_hash(audio_path)
-    cache_file = EMBEDDING_CACHE_DIR / f"{file_hash}.npz"
+    emb_hash = get_embedding_hash(audio_path, session_id)
+    cache_file = EMBEDDING_CACHE_DIR / f"{emb_hash}.npz"
     is_cached = False
     wav_splits = []
     duration_sec = 0.0

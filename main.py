@@ -77,9 +77,6 @@ setup_logging()
 # Clean up embedding cache on startup
 clean_cache_directories()
 
-logger.info(f"🖥️  Cihaz: {settings.device.upper()} | Hesaplama tipi: {settings.compute_type}")
-logger.info(f"📁 Önbellek dizini: {settings.cache_base_dir.absolute()}")
-
 # Import UI components at module level so Gradio CLI can detect the 'demo' object
 from app.ui import UI_CSS, demo  # noqa: E402
 

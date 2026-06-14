@@ -190,6 +190,7 @@ def transcribe(
                 speaker_timeline, used_cache = diarize(
                     audio_path,
                     int(num_speakers),
+                    session_id=session_id,
                     low_latency=low_latency,
                     progress=progress_callback,
                 )

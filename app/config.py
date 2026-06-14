@@ -38,6 +38,7 @@ class GlobalConfig(BaseModel):
     # Models can be large (~5GB+ total), so allowing an independent mount point is recommended
     models_dir: Path = Field(default=Path(os.getenv("MODELS_DIR", "cache/models")))
     default_cache_size_mb: int = 1000
+    session_expiry_hours: int = 24
     whisper_model_sizes_mb: dict[str, int] = Field(default={"small": 600, "medium": 1600, "large-v3": 3200})
     device: str = Field(default="cpu")
     compute_type: str = Field(default="int8_float32")

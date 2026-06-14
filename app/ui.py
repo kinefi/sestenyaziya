@@ -4,8 +4,9 @@ import os
 import gradio as gr
 
 from .cache_utils import (
+    delete_session_cache,
     get_cache_size_mb,
-    get_free_disk_mb,
+    get_models_size_mb,
 )
 from .config import (
     SUPPORTED_LANGUAGES,
@@ -36,8 +37,8 @@ def _format_size(size_mb: float) -> str:
 
 def update_health_dashboard():
     stats = get_health_status()
-    transcription_cache = get_cache_size_mb()
-    model_cache = get_free_disk_mb()
+    total_cache_size = get_cache_size_mb()
+    model_cache_size = get_models_size_mb()
 
     time_display = stats["timeout_remaining"]
     # Apply red highlighting if time is below 60 seconds
@@ -53,8 +54,8 @@ def update_health_dashboard():
     | **Cihaz / CUDA** | `{stats['device']}` / {stats['cuda_status']} |
     | **Son Sinyal** | {stats['last_seen']} |
     | **Süre Sınırı / Kalan** | {stats['active_timeout']}s / {time_display} |
-    | **Veri Önbelleği** | {_format_size(transcription_cache)} |
-    | **Boş Disk Alanı** | {_format_size(model_cache)} |
+    | **Toplam Önbellek** | {_format_size(total_cache_size)} |
+    | **Model Klasörü** | {_format_size(model_cache_size)} |
     """
 
 
@@ -297,12 +298,15 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
             pause_event.set()
             return {pause_btn: gr.update(value="▶️ Devam Et")}
 
-    def handle_session_cleanup(audio_path, txt_path, srt_path, vtt_path):
-        if not any([audio_path, txt_path, srt_path, vtt_path]):
+    def handle_session_cleanup(session_id, audio_path, txt_path, srt_path, vtt_path):
+        if session_id:
+            delete_session_cache(session_id)
+
+        if not any([session_id, audio_path, txt_path, srt_path, vtt_path]):
             return {}
         for p in [audio_path, txt_path, srt_path, vtt_path]:
             _safe_remove(p)
-        logger.info("Oturum verileri ve geçici dosyalar temizlendi.")
+        logger.info(f"Oturum verileri ve geçici dosyalar temizlendi: {session_id}")
         return {
             audio_input: None,
             output_text: "",
@@ -435,16 +439,16 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
     session_clear_btn.click(
         fn=handle_session_cleanup,
         js="""
-        (audio, txt, srt, vtt) => {
+        (sid, audio, txt, srt, vtt) => {
             const msg = "Oturum verilerini ve üretilen tüm dosyaları kalıcı olarak silmek istediğinize emin misiniz?";
             if (!confirm(msg)) {
-                return [null, null, null, null];
+                return [null, null, null, null, null];
             }
             navigator.clipboard.writeText("");
-            return [audio, txt, srt, vtt];
+            return [sid, audio, txt, srt, vtt];
         }
         """,
-        inputs=[last_audio_path, download_txt, download_srt, download_vtt],
+        inputs=[session_id, last_audio_path, download_txt, download_srt, download_vtt],
         outputs=cleanup_outputs,
     )
 
@@ -467,9 +471,11 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
     )
 
     # Clean up logging for session disconnects
-    demo.unload(
-        fn=lambda: logger.info("Oturum sonlandırıldı."),
-    )
+    def on_unload():
+        logger.info("Oturum sonlandırıldı.")
+        # Note: We don't automatically delete files here to allow for page refreshes
+
+    demo.unload(fn=on_unload)
 
     # Consolidated load event for better sync
     demo.load(

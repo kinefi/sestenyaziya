@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from .config import EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR, settings
@@ -30,7 +31,15 @@ def get_transcription_hash(
     """Generates a hash for a specific transcription configuration."""
     file_hash = get_file_hash(audio_path)
     key = f"{session_id}_{file_hash}_{model_size}_{int(diarization)}_{num_speakers}_{language}"
-    return hashlib.sha256(key.encode()).hexdigest()
+    # Prefixing the hash with session_id makes it easy to find and delete session files later
+    h = hashlib.sha256(key.encode()).hexdigest()
+    return f"{session_id}_{h}" if session_id else h
+
+
+def get_embedding_hash(audio_path: str, session_id: str = "") -> str:
+    """Generates a hash for embedding cache, optionally prefixed by session_id."""
+    file_hash = get_file_hash(audio_path)
+    return f"{session_id}_{file_hash}" if session_id else file_hash
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8"):
@@ -63,8 +72,30 @@ def get_cache_size_mb() -> float:
     return total_size / (1024 * 1024)
 
 
+def cleanup_expired_cache():
+    """Deletes files that haven't been accessed for more than the configured expiry time."""
+    expiry_seconds = settings.session_expiry_hours * 3600
+    now = time.time()
+    deleted_count = 0
+
+    for d in [EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR]:
+        if not d.exists():
+            continue
+        for f in d.glob("*"):
+            if f.is_file():
+                if (now - f.stat().st_mtime) > expiry_seconds:
+                    try:
+                        f.unlink()
+                        deleted_count += 1
+                    except Exception:
+                        logger.exception(f"Failed to delete expired cache file: {f}")
+    if deleted_count > 0:
+        logger.info(f"Expired cache cleaned: {deleted_count} files removed (TTL: {settings.session_expiry_hours}h)")
+
+
 def clean_cache_directories():
     """Deletes oldest cache files until the total size is within the limit."""
+    cleanup_expired_cache()
     directories = [EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR]
     max_size_mb = settings.default_cache_size_mb
     files = []
@@ -96,7 +127,36 @@ def clean_cache_directories():
         logger.info(f"Cache cleaned: {deleted_count} files deleted. Current size: {total_size / (1024 * 1024):.1f} MB")
 
 
+def get_models_size_mb() -> float:
+    """Calculates total size of files in the models directory in MB."""
+    total_size = 0
+    if settings.models_dir.exists():
+        for f in settings.models_dir.glob("**/*"):
+            if f.is_file():
+                total_size += f.stat().st_size
+    return total_size / (1024 * 1024)
+
+
 def get_free_disk_mb() -> float:
     """Returns free disk space on the models directory mount point in MB."""
-    usage = shutil.disk_usage(settings.models_dir.absolute())
+    path = settings.models_dir.absolute()
+    # Walk up to the first existing parent directory to check disk usage
+    # if the target directory doesn't exist yet.
+    while not path.exists() and path.parent != path:
+        path = path.parent
+    usage = shutil.disk_usage(path)
     return usage.free / (1024 * 1024)
+
+
+def delete_session_cache(session_id: str):
+    """Deletes all cache files associated with a specific session_id."""
+    if not session_id:
+        return
+
+    prefix = f"{session_id}_"
+    for d in [TRANSCRIPT_CACHE_DIR, EMBEDDING_CACHE_DIR]:
+        for f in d.glob(f"{prefix}*"):
+            try:
+                f.unlink()
+            except Exception:
+                logger.exception(f"Failed to delete session file: {f}")
