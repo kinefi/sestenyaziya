@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
+import logging
 import os
 
-import app.config as cfg
-from app.cache_utils import clean_embedding_cache
+from app.cache_utils import clean_cache_directories
+from app.config import ModelSize, settings, setup_logging, update_settings
+
+logger = logging.getLogger(__name__)
 
 
 def setup_config():
@@ -12,29 +15,29 @@ def setup_config():
     parser = argparse.ArgumentParser(description="Ses'ten Yazıya — Türkçe konuşmayı metne dönüştürür")
     parser.add_argument(
         "--model",
-        default=cfg.DEFAULT_MODEL_SIZE,
-        choices=cfg.ModelSize.values(),
+        default=settings.default_model_size,
+        choices=ModelSize.values(),
         metavar="SIZE",
         help="Whisper model boyutu: small | medium | large-v3 (varsayılan: %(default)s)",
     )
     parser.add_argument(
         "--sample-rate",
         type=int,
-        default=cfg.SAMPLE_RATE,
+        default=settings.sample_rate,
         metavar="HZ",
         help="Ses örnekleme hızı (varsayılan: %(default)s)",
     )
     parser.add_argument(
         "--paragraph-pause",
         type=float,
-        default=cfg.PARAGRAPH_PAUSE,
+        default=settings.paragraph_pause,
         metavar="SEC",
         help="Paragraf sınırı için sessizlik eşiği saniye (varsayılan: %(default)s)",
     )
     parser.add_argument(
         "--timeout",
         type=int,
-        default=cfg.TRANSCRIPTION_TIMEOUT,
+        default=settings.transcription_timeout,
         metavar="SEC",
         help="Tek bir dosya için işlem zaman aşımı (varsayılan: %(default)s)",
     )
@@ -60,10 +63,7 @@ def setup_config():
     args, _ = parser.parse_known_args()
 
     # Update config values globally
-    cfg.DEFAULT_MODEL_SIZE = args.model
-    cfg.SAMPLE_RATE = args.sample_rate
-    cfg.PARAGRAPH_PAUSE = args.paragraph_pause
-    cfg.TRANSCRIPTION_TIMEOUT = args.timeout
+    update_settings(args.model, args.sample_rate, args.paragraph_pause, args.timeout)
 
     if args.hf_token:
         os.environ["HF_TOKEN"] = args.hf_token
@@ -72,15 +72,13 @@ def setup_config():
 
 
 args = setup_config()
-cfg.setup_logging()
+setup_logging()
 
 # Clean up embedding cache on startup
-clean_embedding_cache(
-    [cfg.EMBEDDING_CACHE_DIR, cfg.TRANSCRIPT_CACHE_DIR, cfg.TEMP_EXPORT_DIR],
-    max_size_mb=cfg.DEFAULT_CACHE_SIZE_MB,
-)
+clean_cache_directories()
 
-print(f"🖥️  Cihaz: {cfg.device.upper()} | Hesaplama tipi: {cfg.compute_type}")
+logger.info(f"🖥️  Cihaz: {settings.device.upper()} | Hesaplama tipi: {settings.compute_type}")
+logger.info(f"📁 Önbellek dizini: {settings.cache_base_dir.absolute()}")
 
 # Import UI components at module level so Gradio CLI can detect the 'demo' object
 from app.ui import UI_CSS, demo  # noqa: E402

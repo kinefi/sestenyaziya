@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from . import config as cfg
+from .config import EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR, settings
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,10 @@ def atomic_write_text(path: Path, content: str, encoding: str = "utf-8"):
         raise
 
 
-def get_cache_size_mb(directories: list[Path]) -> float:
+def get_cache_size_mb() -> float:
     """Calculates total size of files in given directories in MB."""
     total_size = 0
-    for d in directories:
+    for d in [EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR]:
         if d.exists():
             for f in d.glob("**/*"):
                 if f.is_file():
@@ -63,29 +63,10 @@ def get_cache_size_mb(directories: list[Path]) -> float:
     return total_size / (1024 * 1024)
 
 
-def clear_all_cache(cache_base_dir: Path):
-    """Deletes all cached files except for the models directory to avoid re-downloads."""
-    if not cache_base_dir.exists():
-        return
-
-    for item in cache_base_dir.iterdir():
-        # Resolve absolute paths to ensure we don't accidentally delete the persisted model directory
-        if item.is_dir() and item.resolve() == cfg.MODELS_DIR.resolve():
-            continue
-
-        try:
-            if item.is_dir():
-                shutil.rmtree(item)
-            else:
-                item.unlink()
-        except Exception as e:
-            logger.error(f"Failed to delete cache item {item}: {e}")
-
-    logger.info("Cache content cleared (models preserved).")
-
-
-def clean_embedding_cache(directories: list[Path], max_size_mb: int = 1000):
+def clean_cache_directories():
     """Deletes oldest cache files until the total size is within the limit."""
+    directories = [EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR]
+    max_size_mb = settings.default_cache_size_mb
     files = []
     for d in directories:
         if d.exists():
@@ -115,12 +96,7 @@ def clean_embedding_cache(directories: list[Path], max_size_mb: int = 1000):
         logger.info(f"Cache cleaned: {deleted_count} files deleted. Current size: {total_size / (1024 * 1024):.1f} MB")
 
 
-def check_free_space_mb(path: Path) -> float:
-    """Returns the free disk space in MB for the partition containing the path."""
-    # Find the first existing parent directory to check usage
-    check_path = path.absolute()
-    while not check_path.exists() and check_path.parent != check_path:
-        check_path = check_path.parent
-
-    usage = shutil.disk_usage(check_path)
+def get_free_disk_mb() -> float:
+    """Returns free disk space on the models directory mount point in MB."""
+    usage = shutil.disk_usage(settings.models_dir.absolute())
     return usage.free / (1024 * 1024)

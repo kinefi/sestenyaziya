@@ -33,17 +33,26 @@ Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uyg
 
 ## Kurulum
 
-Öncelikle [uv paket yöneticisini](https://docs.astral.sh/uv/getting-started/installation/) kurmak gerekiyor. Python destekleyen her işletim sisteminde çalışır.
+Uygulamayı çalıştırmanın en kolay yolu **uv** kullanmaktır. Bu araç, gerekli olan Python sürümünü ve kütüphaneleri sizin yerinize otomatik olarak ayarlar.
 
-Daha sonra ihtiyaç duyduğu ortamı hazırlamak gerekir:
+### 1. Adım: uv Paket Yöneticisini Kurun
+- **Windows (PowerShell):**
+  ```powershell
+  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+  ```
+- **macOS / Linux:**
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
 
-```bash
-uv sync
-```
+### 2. Adım: Uygulamayı İndirin
+Bu projeyi ZIP olarak indirin ve bir klasöre çıkartın. Terminali (veya Komut İstemi'ni) bu klasörün içinde açın.
 
-> İlk çalıştırmada Whisper modeli (small: ~480 MB, medium: ~1.5 GB, large-v3: ~3 GB) ve SpeechBrain encoder'ı (~85 MB) Hugging Face Hub'dan otomatik indirilir.
+---
 
 ## Kullanım
+
+Terminalde şu tek komutu yazmanız yeterlidir:
 
 ```bash
 uv run python main.py

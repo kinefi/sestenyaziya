@@ -3,11 +3,11 @@ import time
 from collections.abc import Generator
 from dataclasses import astuple, dataclass
 
-from . import config as cfg
-from . import models
-from .cache_utils import atomic_write_text, clean_embedding_cache, get_transcription_hash
-from .config import PARAGRAPH_PAUSE, device
+from . import model
+from .cache_utils import atomic_write_text, clean_cache_directories, get_transcription_hash
+from .config import TRANSCRIPT_CACHE_DIR, settings
 from .diarization import diarize, dominant_speaker
+from .watchdog import heartbeat, pause_event, set_processing_state, stop_event
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +23,7 @@ class TranscriptionResult:
     progress: float = 0.0
 
 
-cfg.TRANSCRIPT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-cfg.TEMP_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+TRANSCRIPT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _fmt(seconds: float, is_sub: bool = False, ms_sep: str = ",") -> str:
@@ -63,6 +62,18 @@ def _generate_srt_vtt(segments: list, is_vtt: bool = False, speaker_timeline=Non
     return output
 
 
+def _save_transcription_artifacts(text: str, segments: list, speaker_timeline: list | None, paths: tuple):
+    """Helper to write all output formats to disk atomically."""
+    txt_p, srt_p, vtt_p = paths
+    if text.strip():
+        atomic_write_text(txt_p, text.strip())
+    if segments:
+        srt_content = _generate_srt_vtt(segments, is_vtt=False, speaker_timeline=speaker_timeline)
+        atomic_write_text(srt_p, srt_content)
+        vtt_content = _generate_srt_vtt(segments, is_vtt=True, speaker_timeline=speaker_timeline)
+        atomic_write_text(vtt_p, vtt_content)
+
+
 def transcribe(
     audio_path: str,
     model_size: str,
@@ -74,9 +85,9 @@ def transcribe(
     low_latency: bool = False,
 ) -> Generator[tuple]:
     """Ses dosyasını Türkçe metne dönüştürür; akış olarak sonuç verir."""
-    models.pause_event.clear()
-    models.stop_event.clear()
-    models.set_processing_state(True, timeout=timeout)
+    pause_event.clear()
+    stop_event.clear()
+    set_processing_state(True, timeout=timeout)
 
     speaker_info = ""  # Initialize early for error/early exit paths
     try:
@@ -104,9 +115,9 @@ def transcribe(
             session_id,
             language or "auto",
         )
-        txt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.txt"
-        srt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.srt"
-        vtt_cache = cfg.TRANSCRIPT_CACHE_DIR / f"{t_hash}.vtt"
+        txt_cache = TRANSCRIPT_CACHE_DIR / f"{t_hash}.txt"
+        srt_cache = TRANSCRIPT_CACHE_DIR / f"{t_hash}.srt"
+        vtt_cache = TRANSCRIPT_CACHE_DIR / f"{t_hash}.vtt"
 
         if txt_cache.exists() and srt_cache.exists() and vtt_cache.exists():
             logger.info(f"Loading transcription from cache: {t_hash}")
@@ -125,7 +136,7 @@ def transcribe(
             )
             return
 
-        if models.current_model_size != model_size or models.model is None:
+        if model.current_model_size != model_size or model.model is None:
             yield astuple(
                 TranscriptionResult(
                     result="",
@@ -137,11 +148,10 @@ def transcribe(
                     progress=0.0,
                 )
             )
-            models.load_model(model_size)
+            model.load_model(model_size)
 
         # Bind a stable local reference
-        whisper_model = models.model
-        if whisper_model is None:
+        if model.model is None:
             yield astuple(
                 TranscriptionResult(
                     result="❌ Hata: Model yüklenemedi. Logları kontrol edin.",
@@ -174,7 +184,7 @@ def transcribe(
                 )
 
                 def progress_callback(pct, desc=""):
-                    models.heartbeat()
+                    heartbeat()
                     logger.info(f"Diarization: {pct * 100:.0f}% - {desc}")
 
                 speaker_timeline, used_cache = diarize(
@@ -194,8 +204,10 @@ def transcribe(
                         txt_path=None,
                         srt_path=None,
                         vtt_path=None,
-                        status=f"⚠️ Konuşmacı ayrıştırma başarısız ({type(e).__name__}: {e}),\
-                            düz metin devam ediliyor...",
+                        status=(
+                            f"⚠️ Konuşmacı ayrıştırma başarısız ({type(e).__name__}: {e}), "
+                            "düz metin devam ediliyor..."
+                        ),
                         speaker_info="",
                         progress=10.0,
                     )
@@ -221,7 +233,7 @@ def transcribe(
         # and speeds up the process by skipping the first 30-second detection phase.
         target_lang = language if language != "auto" else None
 
-        segments, info = whisper_model.transcribe(
+        segments, info = model.model.transcribe(
             str(audio_path),
             language=target_lang,
             beam_size=current_beam_size,
@@ -244,16 +256,13 @@ def transcribe(
         all_segments = []
 
         for seg in segments:
-            models.heartbeat()
+            heartbeat()
             elapsed_now = time.time() - start_time
             remaining_time = max(0, timeout - elapsed_now)
             if elapsed_now > timeout:
                 logger.error(f"Transcription timed out after {timeout} seconds.")
-                atomic_write_text(txt_cache, result)
-                srt_content = _generate_srt_vtt(all_segments, is_vtt=False, speaker_timeline=speaker_timeline)
-                atomic_write_text(srt_cache, srt_content)
-                vtt_content = _generate_srt_vtt(all_segments, is_vtt=True, speaker_timeline=speaker_timeline)
-                atomic_write_text(vtt_cache, vtt_content)
+                _save_transcription_artifacts(result, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache))
+
                 yield astuple(
                     TranscriptionResult(
                         result=result,
@@ -267,7 +276,7 @@ def transcribe(
                 return
 
             all_segments.append(seg)
-            if models.pause_event.is_set():
+            if pause_event.is_set():
                 yield astuple(
                     TranscriptionResult(
                         result=result,
@@ -278,7 +287,7 @@ def transcribe(
                         speaker_info=speaker_info,
                     )
                 )
-                while models.pause_event.is_set() and not models.stop_event.is_set():
+                while pause_event.is_set() and not stop_event.is_set():
                     time.sleep(0.1)
 
             gap = seg.start - last_end if seg.start > last_end else 0.0
@@ -293,14 +302,14 @@ def transcribe(
                     diarized_parts.append(f"[{speaker}]\n")
                     last_speaker = speaker
                 else:
-                    if gap > PARAGRAPH_PAUSE:
+                    if gap > settings.paragraph_pause:
                         diarized_parts.append("\n\n")
                     else:
                         diarized_parts.append(" ")
                 diarized_parts.append(text)
                 result = "".join(diarized_parts)
             else:
-                if gap > PARAGRAPH_PAUSE:
+                if gap > settings.paragraph_pause:
                     paragraphs.append([])
                 paragraphs[-1].append(seg.text.strip())
                 result = "\n\n".join(" ".join(p) for p in paragraphs if p)
@@ -312,29 +321,24 @@ def transcribe(
             )
             progress_pct = (seg.end / duration * 100) if duration > 0 else 0
 
-            if models.stop_event.is_set():
+            if stop_event.is_set():
                 # Save whatever we have so far before exiting
                 current_text = result.strip()
-                if current_text:
-                    atomic_write_text(txt_cache, current_text)
-                    atomic_write_text(
-                        srt_cache, _generate_srt_vtt(all_segments, is_vtt=False, speaker_timeline=speaker_timeline)
-                    )
-                    atomic_write_text(
-                        vtt_cache, _generate_srt_vtt(all_segments, is_vtt=True, speaker_timeline=speaker_timeline)
-                    )
+                _save_transcription_artifacts(
+                    current_text, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache)
+                )
 
-                    yield astuple(
-                        TranscriptionResult(
-                            result=current_text,
-                            txt_path=str(txt_cache),
-                            srt_path=str(srt_cache),
-                            vtt_path=str(vtt_cache),
-                            status="⏹️ Durduruldu.",
-                            speaker_info=speaker_info,
-                            progress=progress_pct,
-                        )
+                yield astuple(
+                    TranscriptionResult(
+                        result=current_text,
+                        txt_path=str(txt_cache),
+                        srt_path=str(srt_cache),
+                        vtt_path=str(vtt_cache),
+                        status="⏹️ Durduruldu.",
+                        speaker_info=speaker_info,
+                        progress=progress_pct,
                     )
+                )
                 return
 
             yield astuple(
@@ -380,17 +384,13 @@ def transcribe(
             )
         )
 
-        atomic_write_text(txt_cache, final_result)
-        srt_content = _generate_srt_vtt(all_segments, is_vtt=False, speaker_timeline=speaker_timeline)
-        atomic_write_text(srt_cache, srt_content)
-        vtt_content = _generate_srt_vtt(all_segments, is_vtt=True, speaker_timeline=speaker_timeline)
-        atomic_write_text(vtt_cache, vtt_content)
+        _save_transcription_artifacts(final_result, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache))
 
         speed = f"{duration / elapsed:.1f}x" if elapsed > 0 else "—"
         stats = (
             f"✅ Tamamlandı!\n\n"
             f"**📊 İstatistikler**\n"
-            f"- Model: {models.current_model_size} ({device.upper()})\n"
+            f"- Model: {model.current_model_size} ({settings.device.upper()})\n"
             f"- Ses süresi: {duration:.1f} sn\n"
             f"- İşlem süresi: {elapsed:.1f} sn\n"
             f"- Hız: {speed}"
@@ -422,12 +422,9 @@ def transcribe(
             )
         )
     finally:
-        models.set_processing_state(False)
+        set_processing_state(False)
         # Proactively clean up generated caches to protect ephemeral storage limits
         try:
-            clean_embedding_cache(
-                [cfg.EMBEDDING_CACHE_DIR, cfg.TRANSCRIPT_CACHE_DIR, cfg.TEMP_EXPORT_DIR],
-                max_size_mb=cfg.DEFAULT_CACHE_SIZE_MB,
-            )
+            clean_cache_directories()
         except Exception:
             logger.exception("İşlem sonrası önbellek temizliği başarısız oldu")

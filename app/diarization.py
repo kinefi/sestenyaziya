@@ -1,22 +1,26 @@
 import bisect
+import logging
 import os
 import tempfile
+from collections.abc import Generator
 
 import av
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-from . import models
-from .cache_utils import get_file_hash
-from .config import EMBEDDING_CACHE_DIR, SAMPLE_RATE
+from app.config import EMBEDDING_CACHE_DIR, settings
 
+from .cache_utils import get_file_hash
+from .encoder import get_voice_encoder
+
+logger = logging.getLogger(__name__)
 EMBEDDING_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _stream_audio(audio_path: str):
+def _stream_audio(audio_path: str) -> Generator[np.ndarray]:
     """Yields audio chunks from the file to avoid loading everything at once."""
-    resampler = av.AudioResampler(format="fltp", layout="mono", rate=SAMPLE_RATE)
+    resampler = av.AudioResampler(format="fltp", layout="mono", rate=settings.sample_rate)
     try:
         with av.open(audio_path) as container:
             if not container.streams.audio:
@@ -26,7 +30,8 @@ def _stream_audio(audio_path: str):
                     yield out.to_ndarray()[0]
             for out in resampler.resample(None):
                 yield out.to_ndarray()[0]
-    except (av.AVError, UnicodeDecodeError):
+    except (av.AVError, UnicodeDecodeError) as e:
+        logger.error(f"Failed to stream audio from {audio_path}: {e}")
         return
 
 
@@ -36,7 +41,8 @@ def _auto_detect_k(embeddings: np.ndarray) -> tuple[int, np.ndarray]:
     best_k, best_score, best_labels = 2, -1.0, None
 
     # Sample embeddings if there are too many to speed up silhouette calculation
-    sample_indices = np.random.choice(n, min(n, 1000), replace=False) if n > 1000 else np.arange(n)
+    rng = np.random.default_rng(42)
+    sample_indices = rng.choice(n, min(n, 1000), replace=False) if n > 1000 else np.arange(n)
     eval_embeddings = embeddings[sample_indices]
 
     # Search up to 10 speakers or the number of samples available
@@ -61,7 +67,7 @@ def diarize(
     progress=None,
 ) -> tuple[list[tuple[float, float, str]], bool]:
     """Returns (start_sec, end_sec, speaker_label) segments covering the full audio."""
-    encoder = models.get_voice_encoder(low_latency=low_latency)
+    encoder = get_voice_encoder(low_latency=low_latency)
 
     if progress:
         progress(0.1, desc="Ses dosyası yükleniyor...")
@@ -80,7 +86,7 @@ def diarize(
             partial_embeds = data["embeds"]
             wav_splits = [slice(start, stop) for start, stop in zip(data["starts"], data["stops"], strict=False)]
             if wav_splits:
-                duration_sec = wav_splits[-1].stop / SAMPLE_RATE
+                duration_sec = wav_splits[-1].stop / settings.sample_rate
     else:
         if progress:
             progress(0.3, desc="Konuşmacı imzaları çıkarılıyor...")
@@ -89,7 +95,7 @@ def diarize(
         current_samples = []
         current_count = 0
         total_processed = 0
-        chunk_limit = 5 * 60 * SAMPLE_RATE
+        chunk_limit = 5 * 60 * settings.sample_rate
 
         def process_chunk():
             nonlocal total_processed, current_samples, current_count
@@ -121,7 +127,7 @@ def diarize(
             return ([(0.0, 0.0, "Sistem: Ses yüklenemedi")], False)
 
         partial_embeds = np.concatenate(all_partial_embeds, axis=0)
-        duration_sec = total_processed / SAMPLE_RATE
+        duration_sec = total_processed / settings.sample_rate
 
         # Atomic save for numpy files
         with tempfile.NamedTemporaryFile(dir=cache_file.parent, delete=False, suffix=".npz") as tmp:
@@ -147,7 +153,7 @@ def diarize(
 
     n = len(partial_embeds)
     if duration_sec < 2.0 or n < 2 or num_speakers == 1:
-        return ([(0.0, duration_sec, "Konuşmacı 1")], False)
+        return ([(0.0, duration_sec, "Konuşmacı 1")], is_cached)
 
     if num_speakers <= 0:
         num_speakers, best_labels = _auto_detect_k(partial_embeds)
@@ -167,17 +173,21 @@ def diarize(
 
     segments = [
         (
-            split.start / SAMPLE_RATE,
-            split.stop / SAMPLE_RATE,
+            split.start / settings.sample_rate,
+            split.stop / settings.sample_rate,
             f"Konuşmacı {speaking_order(int(lbl))}",
         )
         for split, lbl in zip(wav_splits, best_labels, strict=False)
     ]
+    segments.sort(key=lambda x: x[0])
     return segments, is_cached
 
 
 def dominant_speaker(start: float, end: float, timeline: list[tuple[float, float, str]]) -> str:
-    """Returns the speaker with the greatest time overlap in [start, end]."""
+    """Returns the speaker with the greatest time overlap in [start, end].
+
+    Requires timeline to be sorted by start time (guaranteed by diarize()).
+    """
     if not timeline:
         return "Bilinmeyen"
 
