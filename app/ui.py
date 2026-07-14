@@ -71,7 +71,7 @@ def sync_copy_button_on_load(text: str):
 
 
 UI_CSS = """
-    .gradio-container { max-width: 95% !important; margin: auto !important; }
+    .gradio-container { max-width: 95% !important; margin: auto !important; font-size: 16px !important; }
 
     /* ── Remove block margins ────────────────────────────────── */
     .gradio-container .block {
@@ -98,6 +98,8 @@ UI_CSS = """
 
     /* ── Shrink label bottom spacing ─────────────────────────── */
     .gradio-container .label-wrap { padding-bottom: 1px !important; }
+    /* Increase textbox / output font for readability */
+    .gradio-container textarea, .gradio-container input, .gradio-container .output_textbox { font-size: 16px !important; }
 """
 
 with gr.Blocks(title="Sesten Yazıya") as demo:
@@ -117,7 +119,19 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                     : Math.random().toString(36).substring(2, 15));
                 localStorage.setItem('sestenyaziya_session_id', sid);
             }
-            return sid;
+            // Also determine whether the copy button should be visible based on current output textbox
+            try {
+                const outEl = document.getElementById('txt_output');
+                let visible = false;
+                if (outEl) {
+                    // Gradio wraps inputs differently; try querying textarea inside
+                    const ta = outEl.querySelector('textarea') || outEl.querySelector('input');
+                    visible = ta && ta.value && ta.value.trim().length > 0;
+                }
+                return [sid, visible];
+            } catch (e) {
+                return [sid, false];
+            }
         }
         """,
         outputs=[session_id],
@@ -163,6 +177,32 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 value=False,
                 elem_id="chk_low_latency",
             )
+            use_chunking_chk = gr.Checkbox(
+                label="Büyük dosyalarda parça kullan (Chunking)",
+                value=True,
+                elem_id="chk_use_chunking",
+            )
+            chunk_size_slider = gr.Slider(
+                minimum=5,
+                maximum=300,
+                step=5,
+                value=settings.chunk_size_seconds,
+                label="Parça boyutu (saniye)",
+                elem_id="sld_chunk_size",
+            )
+            chunk_overlap_slider = gr.Slider(
+                minimum=0,
+                maximum=30,
+                step=1,
+                value=settings.chunk_overlap_seconds,
+                label="Parça örtüşme (saniye)",
+                elem_id="sld_chunk_overlap",
+            )
+            ffmpeg_piping_chk = gr.Checkbox(
+                label="FFmpeg piping (temp dosya azaltma)",
+                value=False,
+                elem_id="chk_ffmpeg_piping",
+            )
             timeout_slider = gr.Slider(
                 minimum=300,
                 maximum=7200,
@@ -202,13 +242,10 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 download_srt = gr.DownloadButton("📥 SRT İndir", interactive=False, elem_id="dl_srt")
                 download_vtt = gr.DownloadButton("📥 VTT İndir", interactive=False, elem_id="dl_vtt")
 
-        # 3) Health and Cache Settings (Rightmost Column)
+        # 3) Cache and session controls (simplified)
         with gr.Column(scale=1, min_width=200):
-            health_dashboard = gr.Markdown(update_health_dashboard())
-            gr.Timer(5).tick(update_health_dashboard, outputs=health_dashboard)
-
+            gr.Markdown("### 📦 Önbellek ve Oturum")
             session_clear_btn = gr.Button("🗑️ Oturumu Temizle", interactive=False, variant="secondary")
-
             cache_mgmt_status = gr.Label(value="", label="İşlem Durumu", visible=False)
 
     with gr.Row():
@@ -411,6 +448,10 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 timeout_slider,
                 language_selector,
                 low_latency_chk,
+                chunk_size_slider,
+                chunk_overlap_slider,
+                use_chunking_chk,
+                ffmpeg_piping_chk,
             ],
             outputs=transcribe_outputs,
             show_progress="full",

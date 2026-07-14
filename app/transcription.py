@@ -2,6 +2,12 @@ import logging
 import time
 from collections.abc import Generator
 from dataclasses import astuple, dataclass
+from pathlib import Path
+import tempfile
+import os
+from types import SimpleNamespace
+
+from pydub import AudioSegment
 
 from . import model
 from .cache_utils import atomic_write_text, clean_cache_directories, get_transcription_hash
@@ -83,6 +89,11 @@ def transcribe(
     timeout: int,
     language: str | None = "tr",
     low_latency: bool = False,
+    # runtime overrides from UI
+    chunk_size_seconds: int | None = None,
+    chunk_overlap_seconds: int | None = None,
+    use_chunking: bool = True,
+    use_ffmpeg_piping: bool = False,
 ) -> Generator[tuple]:
     """Ses dosyasını Türkçe metne dönüştürür; akış olarak sonuç verir."""
     pause_event.clear()
@@ -168,6 +179,19 @@ def transcribe(
         result = ""
         start_time = time.time()
 
+        file_size_mb = 0.0
+        try:
+            file_size_mb = Path(audio_path).stat().st_size / (1024 * 1024)
+        except OSError:
+            pass
+
+        speed_optimized = low_latency or file_size_mb >= 40.0
+        if speed_optimized and not low_latency:
+            logger.info(
+                "Uzun ses dosyası algılandı (%.1f MB). Hız için transkripsiyon ayarları optimize ediliyor...",
+                file_size_mb,
+            )
+
         speaker_timeline: list[tuple[float, float, str]] | None = None
         if enable_diarization:
             try:
@@ -226,133 +250,540 @@ def transcribe(
             )
         )
 
-        current_beam_size = 1 if low_latency else 5
+        current_beam_size = 1 if speed_optimized else 5
+        temperature = [0.0] if speed_optimized else [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        vad_parameters = {"min_silence_duration_ms": 800 if speed_optimized else 500}
 
-        logger.info(f"Transcription starting: model={model_size}, lang={language or 'auto'}, beam={current_beam_size}")
+        logger.info(
+            "Transcription starting: model=%s, lang=%s, beam=%s, temp=%s, vad_ms=%s",
+            model_size,
+            language or "auto",
+            current_beam_size,
+            temperature,
+            vad_parameters["min_silence_duration_ms"],
+        )
 
         # Passing an explicit language improves accuracy by preventing "language hallucination"
         # and speeds up the process by skipping the first 30-second detection phase.
         target_lang = language if language != "auto" else None
-
-        segments, info = model.model.transcribe(
-            str(audio_path),
-            language=target_lang,
-            beam_size=current_beam_size,
-            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            condition_on_previous_text=False,
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.6,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
-            word_timestamps=False,
-            initial_prompt=("Türkçe konuşma kaydı. Noktalama ve büyük harf kullanımı." if language == "tr" else None),
+        # For very long files, transcribe in chunks to improve responsiveness
+        initial_prompt = (
+            "Türkçe konuşma kaydı. Noktalama ve büyük harf kullanımı." if language == "tr" else None
         )
 
-        duration = info.duration
+        def _transcribe_in_chunks(
+            audio_path: str,
+            model_obj,
+            target_lang,
+            beam_size,
+            temperature,
+            vad_parameters,
+            chunk_seconds: int,
+            overlap_seconds: int,
+            initial_prompt,
+            use_ffmpeg: bool = False,
+        ):
+            """Split `audio_path` into chunks with `chunk_seconds` length and `overlap_seconds` overlap,
+            transcribe each chunk with `model_obj.transcribe`, then stitch segments back together
+            while adjusting timestamps to the original audio timeline.
+            Returns: (segments_list, info_like)
+            """
+            chunk_ms = int(chunk_seconds * 1000)
+            overlap_ms = int(overlap_seconds * 1000)
+            step_ms = chunk_ms - overlap_ms if chunk_ms > overlap_ms else chunk_ms
+
+            combined_segments: list[SimpleNamespace] = []
+            last_end_global = 0.0
+
+            # Use ffmpeg piping to decode chunks directly into numpy if requested
+            for start_ms in range(0, 10**9, step_ms):
+                # compute byte ranges for chunking using ffprobe/fallback via pydub
+                # We'll load the chunk using pydub for duration convenience, but decode via ffmpeg when piping
+                audio = AudioSegment.from_file(audio_path)
+                total_duration = len(audio) / 1000.0
+                if start_ms >= len(audio):
+                    break
+                end_ms = min(start_ms + chunk_ms, len(audio))
+
+                offset = start_ms / 1000.0
+
+                if use_ffmpeg:
+                    # Decode chunk via ffmpeg to float32 PCM on stdout
+                    cmd = [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-ss",
+                        f"{start_ms/1000}",
+                        "-to",
+                        f"{end_ms/1000}",
+                        "-i",
+                        str(audio_path),
+                        "-f",
+                        "f32le",
+                        "-acodec",
+                        "pcm_f32le",
+                        "-ac",
+                        "1",
+                        "-ar",
+                        str(settings.sample_rate),
+                        "-",
+                    ]
+                    try:
+                        import subprocess
+
+                        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        out, err = p.communicate()
+                        if p.returncode != 0:
+                            raise RuntimeError(err.decode(errors="ignore"))
+                        import numpy as _np
+
+                        audio_array = _np.frombuffer(out, dtype=_np.float32)
+                        try:
+                            segs, info = model_obj.transcribe(
+                                audio_array,
+                                language=target_lang,
+                                beam_size=beam_size,
+                                temperature=temperature,
+                                condition_on_previous_text=False,
+                                compression_ratio_threshold=2.4,
+                                log_prob_threshold=-1.0,
+                                no_speech_threshold=0.6,
+                                vad_filter=True,
+                                vad_parameters=vad_parameters,
+                                word_timestamps=False,
+                                initial_prompt=initial_prompt,
+                            )
+                        except Exception:
+                            # Fallback: write chunk to temp WAV via pydub
+                            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                                tmp_path = tf.name
+                            try:
+                                chunk = AudioSegment.from_file(audio_path)[start_ms:end_ms]
+                                chunk = chunk.set_frame_rate(settings.sample_rate).set_channels(1)
+                                chunk.export(tmp_path, format="wav")
+                                segs, info = model_obj.transcribe(
+                                    tmp_path,
+                                    language=target_lang,
+                                    beam_size=beam_size,
+                                    temperature=temperature,
+                                    condition_on_previous_text=False,
+                                    compression_ratio_threshold=2.4,
+                                    log_prob_threshold=-1.0,
+                                    no_speech_threshold=0.6,
+                                    vad_filter=True,
+                                    vad_parameters=vad_parameters,
+                                    word_timestamps=False,
+                                    initial_prompt=initial_prompt,
+                                )
+                            finally:
+                                try:
+                                    os.unlink(tmp_path)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        # On any ffmpeg error fallback to pydub temp file approach
+                        chunk = AudioSegment.from_file(audio_path)[start_ms:end_ms]
+                        chunk = chunk.set_frame_rate(settings.sample_rate).set_channels(1)
+                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                            tmp_path = tf.name
+                        try:
+                            chunk.export(tmp_path, format="wav")
+                            segs, info = model_obj.transcribe(
+                                tmp_path,
+                                language=target_lang,
+                                beam_size=beam_size,
+                                temperature=temperature,
+                                condition_on_previous_text=False,
+                                compression_ratio_threshold=2.4,
+                                log_prob_threshold=-1.0,
+                                no_speech_threshold=0.6,
+                                vad_filter=True,
+                                vad_parameters=vad_parameters,
+                                word_timestamps=False,
+                                initial_prompt=initial_prompt,
+                            )
+                        finally:
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+                else:
+                    chunk = AudioSegment.from_file(audio_path)[start_ms:end_ms]
+                    chunk = chunk.set_frame_rate(settings.sample_rate).set_channels(1)
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                        tmp_path = tf.name
+                    try:
+                        chunk.export(tmp_path, format="wav")
+                        segs, info = model_obj.transcribe(
+                            tmp_path,
+                            language=target_lang,
+                            beam_size=beam_size,
+                            temperature=temperature,
+                            condition_on_previous_text=False,
+                            compression_ratio_threshold=2.4,
+                            log_prob_threshold=-1.0,
+                            no_speech_threshold=0.6,
+                            vad_filter=True,
+                            vad_parameters=vad_parameters,
+                            word_timestamps=False,
+                            initial_prompt=initial_prompt,
+                        )
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except Exception:
+                            pass
+
+                for s in segs:
+                    s_start = s.start + offset
+                    s_end = s.end + offset
+                    if s_end <= last_end_global + 0.01:
+                        continue
+                    if s_start < last_end_global:
+                        s_start = last_end_global
+                    combined_segments.append(SimpleNamespace(start=s_start, end=s_end, text=s.text))
+                    last_end_global = s_end
+
+            return combined_segments, SimpleNamespace(duration=total_duration)
+
+        # Apply runtime overrides from UI if provided
+        if chunk_size_seconds is not None:
+            settings.chunk_size_seconds = int(chunk_size_seconds)
+        if chunk_overlap_seconds is not None:
+            settings.chunk_overlap_seconds = int(chunk_overlap_seconds)
+
+        # Prepare accumulators for streamed processing
+        audio = AudioSegment.from_file(audio_path)
+        duration = len(audio) / 1000.0
         paragraphs: list[list[str]] = [[]]
         diarized_parts: list[str] = []
         last_speaker: str | None = None
         last_end = 0.0
         all_segments = []
 
-        for seg in segments:
-            heartbeat()
-            elapsed_now = time.time() - start_time
-            remaining_time = max(0, timeout - elapsed_now)
-            if elapsed_now > timeout:
-                logger.error(f"Transcription timed out after {timeout} seconds.")
-                _save_transcription_artifacts(result, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache))
+        if speed_optimized and use_chunking:
+            chunk_ms = int(settings.chunk_size_seconds * 1000)
+            overlap_ms = int(settings.chunk_overlap_seconds * 1000)
+            step_ms = chunk_ms - overlap_ms if chunk_ms > overlap_ms else chunk_ms
 
-                yield astuple(
-                    TranscriptionResult(
-                        result=result,
-                        txt_path=str(txt_cache),
-                        srt_path=str(srt_cache),
-                        vtt_path=str(vtt_cache),
-                        status="❌ Hata: İşlem zaman aşımına uğradı.",
-                        speaker_info=speaker_info,
+            for start_ms in range(0, len(audio), step_ms):
+                heartbeat()
+                end_ms = min(start_ms + chunk_ms, len(audio))
+                offset = start_ms / 1000.0
+
+                # Respect timeout between chunks
+                elapsed_now = time.time() - start_time
+                remaining_time = max(0, timeout - elapsed_now)
+                if elapsed_now > timeout:
+                    logger.error(f"Transcription timed out after {timeout} seconds.")
+                    _save_transcription_artifacts(result, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache))
+                    yield astuple(
+                        TranscriptionResult(
+                            result=result,
+                            txt_path=str(txt_cache),
+                            srt_path=str(srt_cache),
+                            vtt_path=str(vtt_cache),
+                            status="❌ Hata: İşlem zaman aşımına uğradı.",
+                            speaker_info=speaker_info,
+                        )
                     )
-                )
-                return
+                    return
 
-            all_segments.append(seg)
-            if pause_event.is_set():
+                try:
+                    if use_ffmpeg_piping:
+                        # decode chunk via ffmpeg to numpy
+                        cmd = [
+                            "ffmpeg",
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-ss",
+                            f"{start_ms/1000}",
+                            "-to",
+                            f"{end_ms/1000}",
+                            "-i",
+                            str(audio_path),
+                            "-f",
+                            "f32le",
+                            "-acodec",
+                            "pcm_f32le",
+                            "-ac",
+                            "1",
+                            "-ar",
+                            str(settings.sample_rate),
+                            "-",
+                        ]
+                        import subprocess
+                        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        out, err = p.communicate()
+                        if p.returncode != 0:
+                            raise RuntimeError(err.decode(errors="ignore"))
+                        import numpy as _np
+
+                        audio_array = _np.frombuffer(out, dtype=_np.float32)
+                        segs, info = model.model.transcribe(
+                            audio_array,
+                            language=target_lang,
+                            beam_size=current_beam_size,
+                            temperature=temperature,
+                            condition_on_previous_text=False,
+                            compression_ratio_threshold=2.4,
+                            log_prob_threshold=-1.0,
+                            no_speech_threshold=0.6,
+                            vad_filter=True,
+                            vad_parameters=vad_parameters,
+                            word_timestamps=False,
+                            initial_prompt=initial_prompt,
+                        )
+                    else:
+                        chunk = audio[start_ms:end_ms]
+                        chunk = chunk.set_frame_rate(settings.sample_rate).set_channels(1)
+                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                            tmp_path = tf.name
+                        try:
+                            chunk.export(tmp_path, format="wav")
+                            segs, info = model.model.transcribe(
+                                tmp_path,
+                                language=target_lang,
+                                beam_size=current_beam_size,
+                                temperature=temperature,
+                                condition_on_previous_text=False,
+                                compression_ratio_threshold=2.4,
+                                log_prob_threshold=-1.0,
+                                no_speech_threshold=0.6,
+                                vad_filter=True,
+                                vad_parameters=vad_parameters,
+                                word_timestamps=False,
+                                initial_prompt=initial_prompt,
+                            )
+                        finally:
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.exception("Chunk transcription failed, aborting chunked flow")
+                    yield astuple(TranscriptionResult(result=f"❌ Bir hata oluştu: {e}", txt_path=None, srt_path=None, vtt_path=None, status="", speaker_info="", progress=0.0))
+                    return
+
+                # Process segments from this chunk
+                for seg in segs:
+                    heartbeat()
+                    # timeout check inside per-segment processing as well
+                    elapsed_now = time.time() - start_time
+                    remaining_time = max(0, timeout - elapsed_now)
+                    if elapsed_now > timeout:
+                        logger.error(f"Transcription timed out after {timeout} seconds.")
+                        _save_transcription_artifacts(result, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache))
+                        yield astuple(
+                            TranscriptionResult(
+                                result=result,
+                                txt_path=str(txt_cache),
+                                srt_path=str(srt_cache),
+                                vtt_path=str(vtt_cache),
+                                status="❌ Hata: İşlem zaman aşımına uğradı.",
+                                speaker_info=speaker_info,
+                            )
+                        )
+                        return
+
+                    s_start = seg.start + offset
+                    s_end = seg.end + offset
+                    if s_end <= last_end + 0.01:
+                        continue
+                    if s_start < last_end:
+                        s_start = last_end
+                    # create a normalized segment object
+                    s_obj = SimpleNamespace(start=s_start, end=s_end, text=seg.text)
+                    all_segments.append(s_obj)
+
+                    if pause_event.is_set():
+                        yield astuple(
+                            TranscriptionResult(
+                                result=result,
+                                txt_path=None,
+                                srt_path=None,
+                                vtt_path=None,
+                                status="⏸️ Duraklatıldı...",
+                                speaker_info=speaker_info,
+                            )
+                        )
+                        while pause_event.is_set() and not stop_event.is_set():
+                            time.sleep(0.1)
+
+                    gap = s_obj.start - last_end if s_obj.start > last_end else 0.0
+                    last_end = s_obj.end
+
+                    if speaker_timeline:
+                        speaker = dominant_speaker(s_obj.start, s_obj.end, speaker_timeline)
+                        text = s_obj.text.strip()
+                        if speaker != last_speaker:
+                            if diarized_parts:
+                                diarized_parts.append("\n\n")
+                            diarized_parts.append(f"[{speaker}]\n")
+                            last_speaker = speaker
+                        else:
+                            if gap > settings.paragraph_pause:
+                                diarized_parts.append("\n\n")
+                            else:
+                                diarized_parts.append(" ")
+                        diarized_parts.append(text)
+                        result = "".join(diarized_parts)
+                    else:
+                        if gap > settings.paragraph_pause:
+                            paragraphs.append([])
+                        paragraphs[-1].append(s_obj.text.strip())
+                        result = "\n\n".join(" ".join(p) for p in paragraphs if p)
+
+                    status = (
+                        f"⏳ Çözümleniyor... {_fmt(s_obj.end)} / {_fmt(duration)} (Kalan süre: {remaining_time:.0f}s)"
+                        if duration > 0
+                        else f"⏳ Çözümleniyor... (Kalan süre: {remaining_time:.0f}s)"
+                    )
+                    progress_pct = (s_obj.end / duration * 100) if duration > 0 else 0
+
+                    if stop_event.is_set():
+                        current_text = result.strip()
+                        _save_transcription_artifacts(current_text, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache))
+                        yield astuple(
+                            TranscriptionResult(
+                                result=current_text,
+                                txt_path=str(txt_cache),
+                                srt_path=str(srt_cache),
+                                vtt_path=str(vtt_cache),
+                                status="⏹️ Durduruldu.",
+                                speaker_info=speaker_info,
+                                progress=progress_pct,
+                            )
+                        )
+                        return
+
+                    yield astuple(
+                        TranscriptionResult(
+                            result=result,
+                            txt_path=None,
+                            srt_path=None,
+                            vtt_path=None,
+                            status=status,
+                            speaker_info=speaker_info,
+                            progress=progress_pct,
+                        )
+                    )
+            # end chunk loop
+        else:
+            # Non-chunked (original single-pass) flow
+            segments, info = model.model.transcribe(
+                str(audio_path),
+                language=target_lang,
+                beam_size=current_beam_size,
+                temperature=temperature,
+                condition_on_previous_text=False,
+                compression_ratio_threshold=2.4,
+                log_prob_threshold=-1.0,
+                no_speech_threshold=0.6,
+                vad_filter=True,
+                vad_parameters=vad_parameters,
+                word_timestamps=False,
+                initial_prompt=initial_prompt,
+            )
+
+            # process segments from full-file transcription
+            for seg in segments:
+                heartbeat()
+                elapsed_now = time.time() - start_time
+                remaining_time = max(0, timeout - elapsed_now)
+                if elapsed_now > timeout:
+                    logger.error(f"Transcription timed out after {timeout} seconds.")
+                    _save_transcription_artifacts(result, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache))
+                    yield astuple(
+                        TranscriptionResult(
+                            result=result,
+                            txt_path=str(txt_cache),
+                            srt_path=str(srt_cache),
+                            vtt_path=str(vtt_cache),
+                            status="❌ Hata: İşlem zaman aşımına uğradı.",
+                            speaker_info=speaker_info,
+                        )
+                    )
+                    return
+
+                all_segments.append(seg)
+                if pause_event.is_set():
+                    yield astuple(
+                        TranscriptionResult(
+                            result=result,
+                            txt_path=None,
+                            srt_path=None,
+                            vtt_path=None,
+                            status="⏸️ Duraklatıldı...",
+                            speaker_info=speaker_info,
+                        )
+                    )
+                    while pause_event.is_set() and not stop_event.is_set():
+                        time.sleep(0.1)
+
+                gap = seg.start - last_end if seg.start > last_end else 0.0
+                last_end = seg.end
+
+                if speaker_timeline:
+                    speaker = dominant_speaker(seg.start, seg.end, speaker_timeline)
+                    text = seg.text.strip()
+                    if speaker != last_speaker:
+                        if diarized_parts:
+                            diarized_parts.append("\n\n")
+                        diarized_parts.append(f"[{speaker}]\n")
+                        last_speaker = speaker
+                    else:
+                        if gap > settings.paragraph_pause:
+                            diarized_parts.append("\n\n")
+                        else:
+                            diarized_parts.append(" ")
+                    diarized_parts.append(text)
+                    result = "".join(diarized_parts)
+                else:
+                    if gap > settings.paragraph_pause:
+                        paragraphs.append([])
+                    paragraphs[-1].append(seg.text.strip())
+                    result = "\n\n".join(" ".join(p) for p in paragraphs if p)
+
+                status = (
+                    f"⏳ Çözümleniyor... {_fmt(seg.end)} / {_fmt(duration)} (Kalan süre: {remaining_time:.0f}s)"
+                    if duration > 0
+                    else f"⏳ Çözümleniyor... (Kalan süre: {remaining_time:.0f}s)"
+                )
+                progress_pct = (seg.end / duration * 100) if duration > 0 else 0
+
+                if stop_event.is_set():
+                    current_text = result.strip()
+                    _save_transcription_artifacts(
+                        current_text, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache)
+                    )
+                    yield astuple(
+                        TranscriptionResult(
+                            result=current_text,
+                            txt_path=str(txt_cache),
+                            srt_path=str(srt_cache),
+                            vtt_path=str(vtt_cache),
+                            status="⏹️ Durduruldu.",
+                            speaker_info=speaker_info,
+                            progress=progress_pct,
+                        )
+                    )
+                    return
+
                 yield astuple(
                     TranscriptionResult(
                         result=result,
                         txt_path=None,
                         srt_path=None,
                         vtt_path=None,
-                        status="⏸️ Duraklatıldı...",
-                        speaker_info=speaker_info,
-                    )
-                )
-                while pause_event.is_set() and not stop_event.is_set():
-                    time.sleep(0.1)
-
-            gap = seg.start - last_end if seg.start > last_end else 0.0
-            last_end = seg.end
-
-            if speaker_timeline:
-                speaker = dominant_speaker(seg.start, seg.end, speaker_timeline)
-                text = seg.text.strip()
-                if speaker != last_speaker:
-                    if diarized_parts:
-                        diarized_parts.append("\n\n")
-                    diarized_parts.append(f"[{speaker}]\n")
-                    last_speaker = speaker
-                else:
-                    if gap > settings.paragraph_pause:
-                        diarized_parts.append("\n\n")
-                    else:
-                        diarized_parts.append(" ")
-                diarized_parts.append(text)
-                result = "".join(diarized_parts)
-            else:
-                if gap > settings.paragraph_pause:
-                    paragraphs.append([])
-                paragraphs[-1].append(seg.text.strip())
-                result = "\n\n".join(" ".join(p) for p in paragraphs if p)
-
-            status = (
-                f"⏳ Çözümleniyor... {_fmt(seg.end)} / {_fmt(duration)} (Kalan süre: {remaining_time:.0f}s)"
-                if duration > 0
-                else f"⏳ Çözümleniyor... (Kalan süre: {remaining_time:.0f}s)"
-            )
-            progress_pct = (seg.end / duration * 100) if duration > 0 else 0
-
-            if stop_event.is_set():
-                # Save whatever we have so far before exiting
-                current_text = result.strip()
-                _save_transcription_artifacts(
-                    current_text, all_segments, speaker_timeline, (txt_cache, srt_cache, vtt_cache)
-                )
-
-                yield astuple(
-                    TranscriptionResult(
-                        result=current_text,
-                        txt_path=str(txt_cache),
-                        srt_path=str(srt_cache),
-                        vtt_path=str(vtt_cache),
-                        status="⏹️ Durduruldu.",
+                        status=status,
                         speaker_info=speaker_info,
                         progress=progress_pct,
                     )
                 )
-                return
-
-            yield astuple(
-                TranscriptionResult(
-                    result=result,
-                    txt_path=None,
-                    srt_path=None,
-                    vtt_path=None,
-                    status=status,
-                    speaker_info=speaker_info,
-                    progress=progress_pct,
-                )
-            )
 
         elapsed = time.time() - start_time
         final_result = (

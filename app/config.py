@@ -34,6 +34,9 @@ class GlobalConfig(BaseModel):
     sample_rate: int = Field(16000, gt=0)
     paragraph_pause: float = Field(1.5, ge=0.1)
     transcription_timeout: int = Field(3600, gt=0)
+    # Chunking for long audio files (seconds)
+    chunk_size_seconds: int = Field(30, gt=1)
+    chunk_overlap_seconds: int = Field(2, ge=0)
     cache_base_dir: Path = Field(default=Path(os.getenv("CACHE_DIR", "cache")))
     # Models can be large (~5GB+ total), so allowing an independent mount point is recommended
     models_dir: Path = Field(default=Path(os.getenv("MODELS_DIR", "cache/models")))
