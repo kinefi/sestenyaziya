@@ -40,7 +40,7 @@ onnxruntime==1.26.0
 orjson==3.11.9
 packaging==26.2
 pandas==3.0.3
-pillow==12.2.0
+pillow==12.3.0
 protobuf==7.35.1
 pycparser==3.0 ; implementation_name != 'PyPy'
 pydantic==2.12.5
