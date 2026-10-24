@@ -98,6 +98,26 @@ UI_CSS = """
 
     /* ── Shrink label bottom spacing ─────────────────────────── */
     .gradio-container .label-wrap { padding-bottom: 1px !important; }
+
+    .gradio-container .health-modal {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 1000 !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background: rgba(18, 25, 32, 0.56) !important;
+        padding: 16px !important;
+    }
+
+    .health-dialog {
+        width: min(620px, 100%) !important;
+        max-height: min(82vh, 760px) !important;
+        overflow-y: auto !important;
+        background: var(--background-fill-primary, white) !important;
+        border: 1px solid rgba(128, 128, 128, 0.35) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.24) !important;
+    }
 """
 
 with gr.Blocks(title="Sesten Yazıya") as demo:
@@ -130,6 +150,7 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                     Sonuçlar anlık ekrana düşer. Model değiştirilirse ilk çalıştırmada yeniden yüklenir.
                     [Kaynak kodu inceleyebilirsiniz.](https://github.com/kinefi/sestenyaziya)
                     """)
+        health_open_btn = gr.Button("🏥 Sistem Durumu", scale=0, elem_id="btn_health")
 
     with gr.Row(equal_height=True):
         # 1) Audio file, model size, settings
@@ -202,13 +223,13 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                 download_srt = gr.DownloadButton("📥 SRT İndir", interactive=False, elem_id="dl_srt")
                 download_vtt = gr.DownloadButton("📥 VTT İndir", interactive=False, elem_id="dl_vtt")
 
-        # 3) Health and Cache Settings (Rightmost Column)
-        with gr.Column(scale=1, min_width=200):
-            health_dashboard = gr.Markdown(update_health_dashboard())
-            gr.Timer(5).tick(update_health_dashboard, outputs=health_dashboard)
-
+    with gr.Column(visible=False, elem_classes=["health-modal"]) as health_modal:
+        with gr.Column(elem_classes=["health-dialog"]):
+            with gr.Row():
+                gr.Markdown("### 🏥 Sistem Sağlığı")
+                health_close_btn = gr.Button("✕", size="sm", scale=0, elem_id="btn_health_close")
+            health_dashboard = gr.Markdown("")
             session_clear_btn = gr.Button("🗑️ Oturumu Temizle", interactive=False, variant="secondary")
-
             cache_mgmt_status = gr.Label(value="", label="İşlem Durumu", visible=False)
 
     with gr.Row():
@@ -226,6 +247,15 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
 
     def on_diarization_change(enabled):
         return {diarization_row: gr.update(visible=enabled)}
+
+    def open_health_modal():
+        return {
+            health_modal: gr.update(visible=True),
+            health_dashboard: update_health_dashboard(),
+        }
+
+    def close_health_modal():
+        return gr.update(visible=False)
 
     def handle_audio_update(new_path, last_path):
         if last_path and last_path != new_path:
@@ -317,7 +347,10 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
             download_txt: gr.update(value=None, interactive=False),
             download_srt: gr.update(value=None, interactive=False),
             download_vtt: gr.update(value=None, interactive=False),
-            cache_mgmt_status: "🗑️ Oturum verileri ve geçici dosyalar temizlendi.",
+            cache_mgmt_status: gr.update(
+                value="🗑️ Oturum verileri ve geçici dosyalar temizlendi.",
+                visible=True,
+            ),
         }
 
     # --- Event Handlers ---
@@ -375,6 +408,17 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
         fn=on_diarization_change,
         inputs=[enable_diarization],
         outputs=[diarization_row],
+    )
+
+    health_open_btn.click(
+        fn=open_health_modal,
+        outputs=[health_modal, health_dashboard],
+        queue=False,
+    )
+    health_close_btn.click(
+        fn=close_health_modal,
+        outputs=[health_modal],
+        queue=False,
     )
 
     audio_input.change(
