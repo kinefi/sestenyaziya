@@ -36,10 +36,18 @@ def get_transcription_hash(
     return f"{session_id}_{h}" if session_id else h
 
 
-def get_embedding_hash(audio_path: str, session_id: str = "") -> str:
-    """Generates a hash for embedding cache, optionally prefixed by session_id."""
+def get_embedding_hash(
+    audio_path: str,
+    session_id: str = "",
+    *,
+    encoder_source: str,
+    sample_rate: int,
+) -> str:
+    """Generates an embedding cache key for the audio and embedding configuration."""
     file_hash = get_file_hash(audio_path)
-    return f"{session_id}_{file_hash}" if session_id else file_hash
+    key = f"{file_hash}_{encoder_source}_{sample_rate}"
+    embedding_hash = hashlib.sha256(key.encode()).hexdigest()
+    return f"{session_id}_{embedding_hash}" if session_id else embedding_hash
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8"):
@@ -61,34 +69,37 @@ def atomic_write_text(path: Path, content: str, encoding: str = "utf-8"):
         raise
 
 
+def mark_cache_used(*paths: Path) -> None:
+    """Refresh cache timestamps so expiration and size cleanup respect recent use."""
+    for path in paths:
+        os.utime(path, None)
+
+
+def _iter_cache_files():
+    for directory in (EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR):
+        if directory.exists():
+            yield from (path for path in directory.rglob("*") if path.is_file())
+
+
 def get_cache_size_mb() -> float:
     """Calculates total size of files in given directories in MB."""
-    total_size = 0
-    for d in [EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR]:
-        if d.exists():
-            for f in d.glob("**/*"):
-                if f.is_file():
-                    total_size += f.stat().st_size
+    total_size = sum(path.stat().st_size for path in _iter_cache_files())
     return total_size / (1024 * 1024)
 
 
 def cleanup_expired_cache():
-    """Deletes files that haven't been accessed for more than the configured expiry time."""
+    """Deletes cache files that haven't been used for more than the configured expiry time."""
     expiry_seconds = settings.session_expiry_hours * 3600
     now = time.time()
     deleted_count = 0
 
-    for d in [EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR]:
-        if not d.exists():
-            continue
-        for f in d.glob("*"):
-            if f.is_file():
-                if (now - f.stat().st_mtime) > expiry_seconds:
-                    try:
-                        f.unlink()
-                        deleted_count += 1
-                    except Exception:
-                        logger.exception(f"Failed to delete expired cache file: {f}")
+    for path in _iter_cache_files():
+        if (now - path.stat().st_mtime) > expiry_seconds:
+            try:
+                path.unlink()
+                deleted_count += 1
+            except Exception:
+                logger.exception(f"Failed to delete expired cache file: {path}")
     if deleted_count > 0:
         logger.info(f"Expired cache cleaned: {deleted_count} files removed (TTL: {settings.session_expiry_hours}h)")
 
@@ -96,13 +107,8 @@ def cleanup_expired_cache():
 def clean_cache_directories():
     """Deletes oldest cache files until the total size is within the limit."""
     cleanup_expired_cache()
-    directories = [EMBEDDING_CACHE_DIR, TRANSCRIPT_CACHE_DIR]
     max_size_mb = settings.default_cache_size_mb
-    files = []
-    for d in directories:
-        if d.exists():
-            files.extend(list(d.glob("*.*")))
-
+    files = list(_iter_cache_files())
     if not files:
         return
 
@@ -154,9 +160,12 @@ def delete_session_cache(session_id: str):
         return
 
     prefix = f"{session_id}_"
-    for d in [TRANSCRIPT_CACHE_DIR, EMBEDDING_CACHE_DIR]:
-        for f in d.glob(f"{prefix}*"):
-            try:
-                f.unlink()
-            except Exception:
-                logger.exception(f"Failed to delete session file: {f}")
+    for directory in (TRANSCRIPT_CACHE_DIR, EMBEDDING_CACHE_DIR):
+        if not directory.exists():
+            continue
+        for path in directory.rglob(f"{prefix}*"):
+            if path.is_file():
+                try:
+                    path.unlink()
+                except Exception:
+                    logger.exception(f"Failed to delete session file: {path}")

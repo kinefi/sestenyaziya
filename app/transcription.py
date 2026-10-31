@@ -4,7 +4,7 @@ from collections.abc import Generator
 from dataclasses import astuple, dataclass
 
 from . import model
-from .cache_utils import atomic_write_text, clean_cache_directories, get_transcription_hash
+from .cache_utils import atomic_write_text, clean_cache_directories, get_transcription_hash, mark_cache_used
 from .config import TRANSCRIPT_CACHE_DIR, settings
 from .diarization import diarize, dominant_speaker
 from .watchdog import heartbeat, pause_event, set_processing_state, stop_event
@@ -122,6 +122,7 @@ def transcribe(
         if txt_cache.exists() and srt_cache.exists() and vtt_cache.exists():
             logger.info(f"Loading transcription from cache: {t_hash}")
             cached_text = txt_cache.read_text(encoding="utf-8")
+            mark_cache_used(txt_cache, srt_cache, vtt_cache)
 
             yield astuple(
                 TranscriptionResult(

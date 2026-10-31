@@ -11,7 +11,7 @@ from sklearn.metrics import silhouette_score
 
 from app.config import EMBEDDING_CACHE_DIR, settings
 
-from .cache_utils import get_embedding_hash
+from .cache_utils import get_embedding_hash, mark_cache_used
 from .encoder import get_voice_encoder
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,12 @@ def diarize(
     if progress:
         progress(0.1, desc="Ses dosyası yükleniyor...")
 
-    emb_hash = get_embedding_hash(audio_path, session_id)
+    emb_hash = get_embedding_hash(
+        audio_path,
+        session_id,
+        encoder_source=encoder.source,
+        sample_rate=settings.sample_rate,
+    )
     cache_file = EMBEDDING_CACHE_DIR / f"{emb_hash}.npz"
     is_cached = False
     wav_splits = []
@@ -88,6 +93,7 @@ def diarize(
             wav_splits = [slice(start, stop) for start, stop in zip(data["starts"], data["stops"], strict=False)]
             if wav_splits:
                 duration_sec = wav_splits[-1].stop / settings.sample_rate
+        mark_cache_used(cache_file)
     else:
         if progress:
             progress(0.3, desc="Konuşmacı imzaları çıkarılıyor...")

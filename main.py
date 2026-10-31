@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
-import logging
 import os
 
 from app.cache_utils import clean_cache_directories
 from app.config import ModelSize, settings, setup_logging, update_settings
-
-logger = logging.getLogger(__name__)
 
 
 def setup_config():
