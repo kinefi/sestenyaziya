@@ -16,19 +16,16 @@ fastapi==0.162.0
 faster-whisper==1.2.1
 filelock==4.2.6
 flatbuffers==25.12.19
-fsspec==2026.9.0
+fsspec==2026.6.0
 gradio==6.31.0
 gradio-client==2.7.2
 groovy==0.1.2
 h11==0.16.0
 hf-gradio==0.4.1
-hf-xet==1.8.0 ; platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
+hf-xet==1.8.0 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
 httpcore==1.0.9
-httpcore2==2.16.0 ; sys_platform != 'emscripten'
 httpx==0.28.1
-httpx2==2.16.0
-httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
-huggingface-hub==2.4.0
+huggingface-hub==1.33.0
 hyperpyyaml==1.2.3
 idna==3.20
 jinja2==3.1.6
@@ -80,7 +77,6 @@ torch==2.15.0+cpu ; sys_platform != 'darwin'
 torchaudio==2.11.1 ; sys_platform == 'darwin'
 torchaudio==2.11.1+cpu ; sys_platform != 'darwin'
 tqdm==4.70.1
-truststore==0.10.5 ; sys_platform != 'emscripten'
 typer==0.27.3
 typing-extensions==4.16.0
 typing-inspection==0.4.4

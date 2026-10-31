@@ -7,7 +7,9 @@ requires-python = ">=3.13"
 LICENSE = "Apache-2.0"
 dependencies = [
     "faster-whisper>=1.2.1",
+    "fsspec>=2023.1.0,<=2026.6.0",
     "gradio>=6.30.0",
+    "huggingface-hub>=0.25.0,<2.0",
     "pydantic>=2.11.10,<=2.12.5",
     "speechbrain>=1.1.0",
     "scikit-learn>=1.9.0",
