@@ -150,7 +150,6 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
                     Sonuçlar anlık ekrana düşer. Model değiştirilirse ilk çalıştırmada yeniden yüklenir.
                     [Kaynak kodu inceleyebilirsiniz.](https://github.com/kinefi/sestenyaziya)
                     """)
-        health_open_btn = gr.Button("🏥 Sistem Durumu", scale=0, elem_id="btn_health")
 
     with gr.Row(equal_height=True):
         # 1) Audio file, model size, settings
@@ -232,7 +231,7 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
             session_clear_btn = gr.Button("🗑️ Oturumu Temizle", interactive=False, variant="secondary")
             cache_mgmt_status = gr.Label(value="", label="İşlem Durumu", visible=False)
 
-    with gr.Row():
+    with gr.Row(equal_height=True):
         submit_btn = gr.Button("✨ Başlat", variant="primary", scale=2, elem_id="btn_submit")
         pause_btn = gr.Button("⏸️ Duraklat", interactive=False, scale=1, elem_id="btn_pause")
         stop_btn = gr.Button(
@@ -242,6 +241,7 @@ with gr.Blocks(title="Sesten Yazıya") as demo:
             scale=1,
             elem_id="btn_stop",
         )
+        health_open_btn = gr.Button("🏥 Sistem Durumu", scale=1, elem_id="btn_health")
 
     # --- UI Logic Functions (Dictionary Returns) ---
 
