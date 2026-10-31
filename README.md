@@ -4,7 +4,7 @@ emoji: 🎤
 colorFrom: blue
 colorTo: green
 sdk: gradio
-sdk_version: "6.18.0"
+sdk_version: "6.31.0"
 python_version: "3.13"
 app_file: main.py
 pinned: false
@@ -29,7 +29,7 @@ Türkçe ses kayıtlarını gerçek zamanlı olarak metne dönüştüren web uyg
 - Konuşmacı ayrıştırma sürecinde performans iyileştirmeleri (binary search tabanlı).
 - Transkripsiyon tamamlandığında `.txt`, `.srt` ve `.vtt` formatlarında indirilebilir.
 - Duraklat / Devam et / Durdur desteği
-- Gelişmiş önbellek yönetimi arayüzü (Boyut sınırı ve temizleme)
+- Sistem sağlığı ve önbellek boyutları, düğmeyle açılan panelde görüntülenir; panelden oturum verileri temizlenebilir.
 
 ## Kurulum
 
@@ -66,7 +66,6 @@ uv run python main.py
 | `--port` | Web arayüzü portu | `7860` |
 | `--paragraph-pause` | Paragraf sonu tespiti için saniye | `1.5` |
 | `--share` | Gradio paylaşım linki oluşturur | `False` |
-```
 
 ### Hot reload (geliştirme)
 
@@ -79,10 +78,13 @@ uv run gradio main.py
 ```text
 ├── app/
 │   ├── config.py         # ModelSize enum, sabitler, cihaz tespiti
-│   ├── models.py         # Whisper ve VoiceEncoder yükleme, duraklatma/durdurma eventleri
+│   ├── model.py          # Whisper model yükleme
+│   ├── encoder.py        # Konuşmacı encoder'ı yükleme
 │   ├── diarization.py    # Ses yükleme (PyAV), konuşmacı ayrıştırma (KMeans)
 │   ├── transcription.py  # Transkripsiyon generator'ı
 │   ├── cache_utils.py    # Önbellek yönetimi, dosya hashing ve temizleme işlemleri
+│   ├── watchdog.py       # Sağlık durumu ve işlem zaman aşımı takibi
+│   ├── utils.py          # Ortak yardımcılar
 │   └── ui.py             # Gradio arayüzü ve callback'ler
 ├── main.py               # Giriş noktası
 ├── pyproject.toml
